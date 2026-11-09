@@ -1,0 +1,5 @@
+TFiD
+add stop words button
+fix circles in lexicon
+lexicon live update
+TF sorting directions

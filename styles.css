@@ -50,6 +50,17 @@ If your plugin does not need CSS, delete this file.
 	color: var(--text-faint);
 }
 
+.lexicon-count-loading {
+	display: inline-block;
+	width: 0.85em;
+	height: 0.85em;
+	border: 2px solid var(--text-faint);
+	border-top-color: var(--interactive-accent);
+	border-radius: 50%;
+	vertical-align: -0.1em;
+	animation: word-frequency-spin 0.8s linear infinite;
+}
+
 .lexicon-entry-fields {
 	display: grid;
 	gap: 0.75rem;
@@ -148,6 +159,197 @@ If your plugin does not need CSS, delete this file.
 	animation: lexicon-modal-shake 0.35s ease-in-out;
 }
 
+.word-frequency-view {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	gap: 0.5rem;
+	padding: 0.75rem;
+}
+
+.word-frequency-view h3,
+.word-frequency-view p {
+	margin: 0;
+}
+
+.word-frequency-description,
+.word-frequency-status {
+	color: var(--text-muted);
+	font-size: var(--font-smaller);
+}
+
+.word-frequency-loading-spinner {
+	display: inline-block;
+	width: 0.9em;
+	height: 0.9em;
+	margin-right: 0.4em;
+	border: 2px solid var(--text-faint);
+	border-top-color: var(--interactive-accent);
+	border-radius: 50%;
+	vertical-align: -0.12em;
+	animation: word-frequency-spin 0.8s linear infinite;
+}
+
+.word-frequency-mode {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+}
+
+.word-frequency-mode input {
+	margin: 0;
+}
+
+.word-frequency-grouping {
+	display: flex;
+	gap: 0.25rem;
+}
+
+.word-frequency-grouping button {
+	flex: 1;
+}
+
+.word-frequency-grouping button[aria-pressed="true"] {
+	color: var(--text-on-accent);
+	background-color: var(--interactive-accent);
+	box-shadow: inset 0 0 0 1px var(--interactive-accent);
+}
+
+.word-frequency-grouping button[aria-pressed="true"]:hover {
+	background-color: var(--interactive-accent-hover);
+}
+
+.word-frequency-filter-control {
+	position: relative;
+}
+
+.word-frequency-filter-input-row {
+	display: flex;
+	gap: 0.25rem;
+}
+
+.word-frequency-filter-input-row input {
+	flex: 1;
+	min-width: 0;
+}
+
+.word-frequency-filter-button {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.word-frequency-filter-button svg {
+	width: 1em;
+	height: 1em;
+}
+
+.word-frequency-filter-menu {
+	position: absolute;
+	top: calc(100% + 0.25rem);
+	right: 0;
+	z-index: var(--layer-popover);
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+	min-width: 100%;
+	padding: 0.75rem;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background-color: var(--background-primary);
+	box-shadow: var(--shadow-s);
+}
+
+.word-frequency-list {
+	flex: 1;
+	overflow-y: auto;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.word-frequency-list li {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 1rem;
+	padding: 0.25rem 0;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.word-frequency-list li[hidden] {
+	display: none;
+}
+
+.word-frequency-skeleton {
+	gap: 1rem;
+}
+
+.word-frequency-skeleton-word,
+.word-frequency-skeleton-bar,
+.word-frequency-skeleton-count {
+	display: block;
+	height: 0.8rem;
+	border-radius: var(--radius-s);
+	background-color: var(--background-modifier-border);
+	animation: word-frequency-pulse 1.2s ease-in-out infinite;
+}
+
+.word-frequency-skeleton-word {
+	width: 35%;
+}
+
+.word-frequency-skeleton-bar {
+	flex: 1 1 3rem;
+}
+
+.word-frequency-skeleton-count {
+	width: 2rem;
+}
+
+.word-frequency-word {
+	flex: 0 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.word-frequency-bar {
+	flex: 1 1 3rem;
+	height: 0.4rem;
+	min-width: 1.5rem;
+	overflow: hidden;
+	border-radius: var(--radius-s);
+	background-color: var(--background-modifier-border);
+}
+
+.word-frequency-bar-fill {
+	display: block;
+	height: 100%;
+	border-radius: inherit;
+	background-color: var(--interactive-accent);
+}
+
+.word-frequency-count {
+	flex: 0 0 auto;
+	color: var(--text-muted);
+	font-variant-numeric: tabular-nums;
+}
+
+.word-frequency-large-file-alert {
+	position: fixed;
+	top: 1rem;
+	right: 1rem;
+	z-index: 10000;
+	max-width: min(24rem, calc(100vw - 2rem));
+	padding: 0.75rem 1rem;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background-color: var(--background-primary);
+	box-shadow: var(--shadow-l);
+	color: var(--text-normal);
+}
+
 @keyframes lexicon-modal-shake {
 	0%,
 	100% {
@@ -162,5 +364,17 @@ If your plugin does not need CSS, delete this file.
 	40%,
 	80% {
 		translate: 6px 0;
+	}
+}
+
+@keyframes word-frequency-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+@keyframes word-frequency-pulse {
+	50% {
+		opacity: 0.45;
 	}
 }

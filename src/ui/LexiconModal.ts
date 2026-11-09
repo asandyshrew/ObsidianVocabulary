@@ -41,6 +41,7 @@ export class LexiconModal extends Modal {
 	private usageIndex: UsageIndex;
 	private usageRefreshTimer?: number;
 	private vaultEventRefs: EventRef[] = [];
+	private metadataEventRef?: EventRef;
 
 	/**
 	 * @param app Obsidian app instance used by the modal.
@@ -85,20 +86,20 @@ export class LexiconModal extends Modal {
 			new Notice('Error loading vocabulary data.');
 		}
 
-		let getUsageCount: (value: string) => number;
-		try {
-			getUsageCount = await this.usageIndex.refresh((completed, total) => {
-				loadingIndicator.setText(`Scanning Markdown files (${completed}/${total})...`);
-			});
-		} catch (error) {
-			// Don't show partial counts; they would look complete but miss unreadable files.
-			console.error('Failed to scan Markdown files for synonym usages:', error);
-			loadingIndicator.setText('Unable to scan Markdown files. Close and reopen the modal to try again.');
-			new Notice('Could not scan Markdown files for synonym usages.');
-			return;
-		}
-
 		loadingIndicator.remove();
+		const scanProgress = contentEl.createEl('p', {
+			cls: 'loading-text',
+			text: 'Preparing usage counts...',
+		});
+		void this.usageIndex.refresh((completed, total) => {
+			scanProgress.setText(`Scanning Markdown files (${completed}/${total})...`);
+		}).catch(error => {
+			console.error('Failed to scan Markdown files for synonym usages:', error);
+			new Notice('Could not update vocabulary usage counts.');
+		}).finally(() => {
+			scanProgress.remove();
+		});
+
 		const entriesEl = contentEl.createDiv({ cls: 'lexicon-entries' });
 		// Keep the inputs together so additions, removals, and saving use the same rows.
 		const entries: LexiconEntryInputs[] = [];
@@ -108,7 +109,7 @@ export class LexiconModal extends Modal {
 		 * all visible term, synonym, and collapsed row counts.
 		 */
 		const refreshUsageCounts = async (onProgress: (completed: number, total: number) => void) => {
-			getUsageCount = await this.usageIndex.refresh(onProgress);
+			await this.usageIndex.refresh(onProgress);
 			entries.forEach(entry => {
 				entry.term.dispatchEvent(new Event('input'));
 				entry.synonyms.forEach(synonym => synonym.dispatchEvent(new Event('input')));
@@ -156,6 +157,11 @@ export class LexiconModal extends Modal {
 				scheduleUsageCountRefresh();
 			}
 		}));
+		this.metadataEventRef = this.app.metadataCache.on('changed', file => {
+			if (isMarkdownFile(file)) {
+				scheduleUsageCountRefresh();
+			}
+		});
 
 		const addEntry = (
 			initialValues: string[] = ['', '', ''],
@@ -168,7 +174,7 @@ export class LexiconModal extends Modal {
 				expanded,
 				initialSynonyms,
 				entryIndex: entries.length,
-				getUsageCount: value => getUsageCount(value),
+				getUsageCount: value => this.usageIndex.getUsageCount(value),
 				saveErrors,
 				onRefactor: (entry, button) => {
 					void refactorEntries([entry], button);
@@ -488,6 +494,10 @@ export class LexiconModal extends Modal {
 		}
 		this.vaultEventRefs.forEach(eventRef => this.app.vault.offref(eventRef));
 		this.vaultEventRefs = [];
+		if (this.metadataEventRef) {
+			this.app.metadataCache.offref(this.metadataEventRef);
+			this.metadataEventRef = undefined;
+		}
 		this.contentEl.empty();
 	}
 }
