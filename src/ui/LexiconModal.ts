@@ -1,4 +1,5 @@
-import { App, Modal, Notice } from 'obsidian';
+import { App, Modal, Notice, TFile } from 'obsidian';
+import type { EventRef } from 'obsidian';
 import {
 	findCommonWordCandidates,
 	loadCommonWords,
@@ -38,6 +39,8 @@ export class LexiconModal extends Modal {
 	private confirmedCommonTerms: string[];
 	private persistCommonTermConfirmations: () => Promise<void>;
 	private usageIndex: UsageIndex;
+	private usageRefreshTimer?: number;
+	private vaultEventRefs: EventRef[] = [];
 
 	/**
 	 * @param app Obsidian app instance used by the modal.
@@ -84,7 +87,7 @@ export class LexiconModal extends Modal {
 
 		let getUsageCount: (value: string) => number;
 		try {
-			getUsageCount = await this.usageIndex.getCounter((completed, total) => {
+			getUsageCount = await this.usageIndex.refresh((completed, total) => {
 				loadingIndicator.setText(`Scanning Markdown files (${completed}/${total})...`);
 			});
 		} catch (error) {
@@ -111,6 +114,48 @@ export class LexiconModal extends Modal {
 				entry.synonyms.forEach(synonym => synonym.dispatchEvent(new Event('input')));
 			});
 		};
+		const scheduleUsageCountRefresh = () => {
+			if (this.usageRefreshTimer !== undefined) {
+				window.clearTimeout(this.usageRefreshTimer);
+			}
+			this.usageRefreshTimer = window.setTimeout(() => {
+				this.usageRefreshTimer = undefined;
+				const progress = contentEl.createEl('p', {
+					text: 'Updating usage counts...',
+					cls: 'loading-text',
+				});
+				void refreshUsageCounts((completed, total) => {
+					progress.setText(`Updating usage counts (${completed}/${total})...`);
+				}).catch(error => {
+					console.error('Failed to refresh Markdown usage counts:', error);
+					new Notice('Could not update usage counts.');
+				}).finally(() => {
+					progress.remove();
+				});
+			}, 300);
+		};
+		const isMarkdownFile = (file: unknown): file is TFile =>
+			file instanceof TFile && file.extension.toLowerCase() === 'md';
+		this.vaultEventRefs.push(this.app.vault.on('create', file => {
+			if (isMarkdownFile(file)) {
+				scheduleUsageCountRefresh();
+			}
+		}));
+		this.vaultEventRefs.push(this.app.vault.on('modify', file => {
+			if (isMarkdownFile(file)) {
+				scheduleUsageCountRefresh();
+			}
+		}));
+		this.vaultEventRefs.push(this.app.vault.on('delete', file => {
+			if (isMarkdownFile(file)) {
+				scheduleUsageCountRefresh();
+			}
+		}));
+		this.vaultEventRefs.push(this.app.vault.on('rename', (file, oldPath) => {
+			if (isMarkdownFile(file) || oldPath.toLowerCase().endsWith('.md')) {
+				scheduleUsageCountRefresh();
+			}
+		}));
 
 		const addEntry = (
 			initialValues: string[] = ['', '', ''],
@@ -123,7 +168,7 @@ export class LexiconModal extends Modal {
 				expanded,
 				initialSynonyms,
 				entryIndex: entries.length,
-				getUsageCount,
+				getUsageCount: value => getUsageCount(value),
 				saveErrors,
 				onRefactor: (entry, button) => {
 					void refactorEntries([entry], button);
@@ -437,6 +482,12 @@ export class LexiconModal extends Modal {
 
 	/** Remove modal content when Obsidian closes the dialog. */
 	onClose() {
+		if (this.usageRefreshTimer !== undefined) {
+			window.clearTimeout(this.usageRefreshTimer);
+			this.usageRefreshTimer = undefined;
+		}
+		this.vaultEventRefs.forEach(eventRef => this.app.vault.offref(eventRef));
+		this.vaultEventRefs = [];
 		this.contentEl.empty();
 	}
 }
