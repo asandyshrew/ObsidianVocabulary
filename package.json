@@ -33,5 +33,9 @@
 	},
 	"allowScripts": {
 		"esbuild@0.25.5": true
+	},
+	"dependencies": {
+		"stemmer": "^2.0.1",
+		"wink-lemmatizer": "^3.0.4"
 	}
 }
