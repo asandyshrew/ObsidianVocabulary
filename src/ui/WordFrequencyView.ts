@@ -1,0 +1,706 @@
+import { ItemView, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
+import type { EventRef } from 'obsidian';
+import { loadCommonWords, loadStopwords } from '../utils/linguistics';
+import { normalizeWordForGrouping } from '../utils/UsageIndex';
+import type { GroupingMode, UsageIndex } from '../utils/UsageIndex';
+
+export const WORD_FREQUENCY_VIEW_TYPE = 'obsidian-vocabulary-word-frequency';
+const REFRESH_INTERVAL_MS = 30_000;
+const YIELD_INTERVAL = 2_000;
+
+interface WordFrequency {
+	word: string;
+	count: number;
+}
+
+interface WordFrequencyRow {
+	item: HTMLLIElement;
+	bar: HTMLSpanElement;
+	barFill: HTMLSpanElement;
+	count: HTMLSpanElement;
+}
+
+function yieldToUI(): Promise<void> {
+	return new Promise(resolve => window.setTimeout(resolve, 0));
+}
+
+export class WordFrequencyView extends ItemView {
+	private statusEl?: HTMLElement;
+	private searchInput?: HTMLInputElement;
+	private filterMenuEl?: HTMLDivElement;
+	private filterMenuButton?: HTMLButtonElement;
+	private groupingButtons = new Map<GroupingMode, HTMLButtonElement>();
+	private singleFileCheckbox?: HTMLInputElement;
+	private commonWordsCheckbox?: HTMLInputElement;
+	private hideCommonWordsCheckbox?: HTMLInputElement;
+	private listEl?: HTMLUListElement;
+	private wordRows = new Map<string, WordFrequencyRow>();
+	private words: WordFrequency[] = [];
+	private sourceLabel = 'in the workspace';
+	private commonWords?: Set<string>;
+	private stopwords?: Set<string>;
+	private effectiveStopwords = new Set<string>();
+	private excludingCommonWords = false;
+	private hidingCommonWords = false;
+	private groupingMode: GroupingMode = 'none';
+	private intervalId?: number;
+	private refreshTimer?: number;
+	private scanId = 0;
+	private renderId = 0;
+	private frequencyUpdateId = 0;
+	private rowVisibilityObserver?: IntersectionObserver;
+	private visibleWordRows = new Set<HTMLLIElement>();
+	private hasShownLargeFileAlert = false;
+	private largeFileAlert?: HTMLElement;
+	private largeFileAlertTimer?: number;
+	private vaultEventRefs: EventRef[] = [];
+	private metadataEventRef?: EventRef;
+	private workspaceEventRef?: EventRef;
+	private outsideClickHandler?: (event: MouseEvent) => void;
+
+	constructor(
+		leaf: WorkspaceLeaf,
+		private usageIndex: UsageIndex,
+		private pluginDirectory?: string,
+	) {
+		super(leaf);
+	}
+
+	getViewType(): string {
+		return WORD_FREQUENCY_VIEW_TYPE;
+	}
+
+	getDisplayText(): string {
+		return 'Word frequency';
+	}
+
+	getIcon(): string {
+		return 'bar-chart-3';
+	}
+
+	async onOpen(): Promise<void> {
+		this.contentEl.empty();
+		this.contentEl.addClass('word-frequency-view');
+		this.contentEl.createEl('h3', { text: 'Word frequency' });
+		this.contentEl.createEl('p', {
+			text: 'Counts words in Markdown files, case-insensitively.',
+			cls: 'word-frequency-description',
+		});
+
+		const filterControl = this.contentEl.createDiv({ cls: 'word-frequency-filter-control' });
+		const filterInputRow = filterControl.createDiv({ cls: 'word-frequency-filter-input-row' });
+		this.searchInput = filterInputRow.createEl('input', {
+			type: 'search',
+			placeholder: 'Filter words',
+			attr: { 'aria-label': 'Filter words' },
+		});
+		this.searchInput.addEventListener('input', () => {
+			void this.renderWords();
+		});
+		this.filterMenuButton = filterInputRow.createEl('button', {
+			cls: 'word-frequency-filter-button',
+			attr: {
+				type: 'button',
+				'aria-label': 'Filter options',
+				'aria-expanded': 'false',
+				'aria-haspopup': 'true',
+				'aria-controls': 'word-frequency-filter-menu',
+			},
+		});
+		setIcon(this.filterMenuButton, 'filter');
+		this.filterMenuEl = filterControl.createDiv({
+			cls: 'word-frequency-filter-menu',
+			attr: { id: 'word-frequency-filter-menu', role: 'group', 'aria-label': 'Filter options' },
+		});
+		this.filterMenuEl.hide();
+		this.filterMenuButton.addEventListener('click', () => this.toggleFilterMenu());
+		filterControl.addEventListener('keydown', event => {
+			if (event.key === 'Escape') {
+				this.closeFilterMenu();
+				this.filterMenuButton?.focus();
+			}
+		});
+
+		const singleFileLabel = this.filterMenuEl.createEl('label', { cls: 'word-frequency-mode' });
+		this.singleFileCheckbox = singleFileLabel.createEl('input', { type: 'checkbox' });
+		singleFileLabel.appendText(' Count active file only');
+		this.singleFileCheckbox.addEventListener('change', () => {
+			void this.refreshCounts();
+		});
+		const commonWordsLabel = this.filterMenuEl.createEl('label', { cls: 'word-frequency-mode' });
+		this.commonWordsCheckbox = commonWordsLabel.createEl('input', { type: 'checkbox' });
+		commonWordsLabel.appendText(' Exclude common words');
+		this.commonWordsCheckbox.addEventListener('change', () => {
+			void this.updateCommonWordFilter();
+		});
+		const hideCommonWordsLabel = this.filterMenuEl.createEl('label', { cls: 'word-frequency-mode' });
+		this.hideCommonWordsCheckbox = hideCommonWordsLabel.createEl('input', { type: 'checkbox' });
+		hideCommonWordsLabel.appendText(' Hide common words; keep in relative frequencies');
+		this.hideCommonWordsCheckbox.addEventListener('change', () => {
+			void this.updateHideCommonWords();
+		});
+
+		const refreshButton = this.contentEl.createEl('button', {
+			text: 'Refresh counts',
+			attr: { type: 'button' },
+		});
+		refreshButton.addEventListener('click', () => {
+			void this.refreshCounts();
+		});
+		const groupingControl = this.contentEl.createDiv({
+			cls: 'word-frequency-grouping',
+			attr: { role: 'group', 'aria-label': 'Word grouping' },
+		});
+		([
+			['none', 'None'],
+			['stem', 'Stem'],
+			['lemma', 'Lemma'],
+		] as const).forEach(([mode, label]) => {
+			const button = groupingControl.createEl('button', {
+				text: label,
+				attr: { type: 'button', 'aria-pressed': String(mode === this.groupingMode) },
+			});
+			button.addEventListener('click', () => this.setGroupingMode(mode));
+			this.groupingButtons.set(mode, button);
+		});
+		this.statusEl = this.contentEl.createEl('p', {
+			cls: 'word-frequency-status',
+			attr: { role: 'status', 'aria-live': 'polite' },
+		});
+		this.listEl = this.contentEl.createEl('ul', { cls: 'word-frequency-list' });
+		this.rowVisibilityObserver = new IntersectionObserver(entries => {
+			entries.forEach(entry => {
+				const row = entry.target as HTMLLIElement;
+				if (entry.isIntersecting) {
+					this.visibleWordRows.add(row);
+				} else {
+					this.visibleWordRows.delete(row);
+				}
+			});
+		}, { root: this.listEl });
+		this.showSkeleton();
+
+		this.vaultEventRefs.push(this.app.vault.on('create', file => {
+			if (this.isMarkdownFile(file)) {
+				this.scheduleRefresh();
+			}
+		}));
+		this.vaultEventRefs.push(this.app.vault.on('modify', file => {
+			if (this.isMarkdownFile(file) || file.path === this.stopwordsResourcePath()) {
+				this.scheduleRefresh();
+			}
+		}));
+		this.vaultEventRefs.push(this.app.vault.on('create', file => {
+			if (file.path === this.stopwordsResourcePath()) {
+				this.scheduleRefresh();
+			}
+		}));
+		this.vaultEventRefs.push(this.app.vault.on('delete', file => {
+			if (this.isMarkdownFile(file)) {
+				this.scheduleRefresh();
+			}
+		}));
+		this.vaultEventRefs.push(this.app.vault.on('rename', (file, oldPath) => {
+			if (this.isMarkdownFile(file) || oldPath.toLowerCase().endsWith('.md')) {
+				this.scheduleRefresh();
+			}
+		}));
+		this.metadataEventRef = this.app.metadataCache.on('changed', file => {
+			if (this.isMarkdownFile(file)) {
+				this.scheduleRefresh();
+			}
+		});
+		this.workspaceEventRef = this.app.workspace.on('active-leaf-change', () => {
+			if (this.singleFileCheckbox?.checked) {
+				this.scheduleRefresh();
+			}
+		});
+		this.intervalId = window.setInterval(() => {
+			void this.refreshCounts();
+		}, REFRESH_INTERVAL_MS);
+		this.outsideClickHandler = event => {
+			if (event.target instanceof Node && !filterControl.contains(event.target)) {
+				this.closeFilterMenu();
+			}
+		};
+		document.addEventListener('click', this.outsideClickHandler);
+
+		void this.refreshCounts();
+	}
+
+	async onClose(): Promise<void> {
+		this.scanId++;
+		if (this.refreshTimer !== undefined) {
+			window.clearTimeout(this.refreshTimer);
+			this.refreshTimer = undefined;
+		}
+		if (this.intervalId !== undefined) {
+			window.clearInterval(this.intervalId);
+			this.intervalId = undefined;
+		}
+		if (this.largeFileAlertTimer !== undefined) {
+			window.clearTimeout(this.largeFileAlertTimer);
+			this.largeFileAlertTimer = undefined;
+		}
+		this.largeFileAlert?.remove();
+		this.largeFileAlert = undefined;
+		this.rowVisibilityObserver?.disconnect();
+		this.rowVisibilityObserver = undefined;
+		this.visibleWordRows.clear();
+		this.vaultEventRefs.forEach(eventRef => this.app.vault.offref(eventRef));
+		this.vaultEventRefs = [];
+		if (this.metadataEventRef) {
+			this.app.metadataCache.offref(this.metadataEventRef);
+			this.metadataEventRef = undefined;
+		}
+		if (this.workspaceEventRef) {
+			this.app.workspace.offref(this.workspaceEventRef);
+			this.workspaceEventRef = undefined;
+		}
+		if (this.outsideClickHandler) {
+			document.removeEventListener('click', this.outsideClickHandler);
+			this.outsideClickHandler = undefined;
+		}
+		this.contentEl.empty();
+	}
+
+	private toggleFilterMenu(): void {
+		if (this.filterMenuEl?.isShown()) {
+			this.closeFilterMenu();
+			return;
+		}
+		this.filterMenuEl?.show();
+		this.filterMenuButton?.setAttribute('aria-expanded', 'true');
+	}
+
+	private closeFilterMenu(): void {
+		this.filterMenuEl?.hide();
+		this.filterMenuButton?.setAttribute('aria-expanded', 'false');
+	}
+
+	private setGroupingMode(mode: GroupingMode): void {
+		this.groupingMode = mode;
+		this.groupingButtons.forEach((button, buttonMode) => {
+			const selected = buttonMode === mode;
+			button.setAttribute('aria-pressed', String(selected));
+			button.toggleClass('is-active', selected);
+		});
+		void this.refreshCounts();
+	}
+
+	private isMarkdownFile(file: unknown): file is TFile {
+		return file instanceof TFile && file.extension.toLowerCase() === 'md';
+	}
+
+	private scheduleRefresh(): void {
+		if (this.refreshTimer !== undefined) {
+			window.clearTimeout(this.refreshTimer);
+		}
+		this.refreshTimer = window.setTimeout(() => {
+			this.refreshTimer = undefined;
+			void this.refreshCounts();
+		}, 300);
+	}
+
+	private async updateCommonWordFilter(): Promise<void> {
+		if (!await this.ensureCommonWordsLoaded()) {
+			if (this.commonWordsCheckbox) {
+				this.commonWordsCheckbox.checked = false;
+			}
+			this.excludingCommonWords = false;
+		} else {
+			this.excludingCommonWords = this.commonWordsCheckbox?.checked ?? false;
+		}
+		await this.renderWords();
+	}
+
+	private async updateHideCommonWords(): Promise<void> {
+		if (!await this.ensureCommonWordsLoaded()) {
+			if (this.hideCommonWordsCheckbox) {
+				this.hideCommonWordsCheckbox.checked = false;
+			}
+			this.hidingCommonWords = false;
+		} else {
+			this.hidingCommonWords = this.hideCommonWordsCheckbox?.checked ?? false;
+		}
+		await this.renderWords();
+	}
+
+	private async ensureCommonWordsLoaded(): Promise<boolean> {
+		if (!this.commonWords) {
+			try {
+				this.commonWords = await loadCommonWords(this.app, this.pluginDirectory);
+			} catch (error) {
+				console.error('Failed to load common words for word frequency:', error);
+				new Notice(error instanceof Error ? error.message : 'Could not load common words.');
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private setStatusLoading(text: string): void {
+		if (!this.statusEl) {
+			return;
+		}
+		this.statusEl.empty();
+		this.statusEl.createSpan({ cls: 'word-frequency-loading-spinner', attr: { 'aria-hidden': 'true' } });
+		this.statusEl.createSpan({ text });
+	}
+
+	private async refreshCounts(): Promise<void> {
+		const scanId = ++this.scanId;
+		const activeFileOnly = this.singleFileCheckbox?.checked ?? false;
+		const activeFile = activeFileOnly ? this.app.workspace.getActiveFile() : null;
+		if (activeFileOnly && !this.isMarkdownFile(activeFile)) {
+			this.words = [];
+			this.clearWordRows();
+			this.statusEl?.setText('Open a Markdown file to count its words.');
+			return;
+		}
+
+		this.sourceLabel = activeFileOnly && this.isMarkdownFile(activeFile)
+			? `in ${activeFile.path}`
+			: 'in the workspace';
+		if (this.wordRows.size === 0) {
+			this.showSkeleton();
+		}
+		this.setStatusLoading('Updating word counts...');
+		try {
+			await this.reloadStopwords();
+			if (scanId !== this.scanId) {
+				return;
+			}
+			const frequencies = await this.usageIndex.getWordFrequencies(
+				this.groupingMode,
+				activeFileOnly && this.isMarkdownFile(activeFile) ? activeFile : undefined,
+				(completed, total) => {
+					if (scanId === this.scanId && (completed % 20 === 0 || completed === total)) {
+						this.setStatusLoading(`Scanning Markdown files (${completed}/${total})...`);
+					}
+				},
+				async (updatedFrequencies: Map<string, number>, scannedWords: number) => {
+					if (scanId === this.scanId) {
+						await this.updateFrequencyRows(updatedFrequencies, scanId, false, scannedWords);
+					}
+				},
+			);
+			if (scanId !== this.scanId) {
+				return;
+			}
+
+			await this.updateFrequencyRows(frequencies, scanId, true);
+			if (scanId !== this.scanId) {
+				return;
+			}
+			const skippedFiles = this.usageIndex.getSkippedFiles(
+				activeFileOnly && this.isMarkdownFile(activeFile) ? activeFile : undefined,
+			);
+			if (skippedFiles.length > 0) {
+				this.showLargeFileAlert();
+			}
+		} catch (error) {
+			if (scanId !== this.scanId) {
+				return;
+			}
+			console.error('Failed to update Markdown word frequency:', error);
+			this.statusEl?.setText('Unable to update word frequency. Try refreshing.');
+			new Notice('Could not update word frequency.');
+		}
+	}
+
+	private stopwordsResourcePath(): string {
+		return `${this.pluginDirectory ?? ''}/resources/stopwords.txt`;
+	}
+
+	private async reloadStopwords(): Promise<void> {
+		this.stopwords = await loadStopwords(this.app, this.pluginDirectory);
+		this.effectiveStopwords = new Set(
+			[...this.stopwords].map(stopword =>
+				normalizeWordForGrouping(stopword, this.groupingMode),
+			),
+		);
+	}
+
+	private showSkeleton(): void {
+		if (
+			!this.listEl ||
+			this.wordRows.size > 0 ||
+			this.listEl.querySelector('.word-frequency-skeleton')
+		) {
+			return;
+		}
+		for (let index = 0; index < 6; index++) {
+			const item = this.listEl.createEl('li', {
+				cls: 'word-frequency-skeleton',
+				attr: { 'aria-hidden': 'true' },
+			});
+			item.createSpan({ cls: 'word-frequency-skeleton-word' });
+			item.createSpan({ cls: 'word-frequency-skeleton-bar' });
+			item.createSpan({ cls: 'word-frequency-skeleton-count' });
+		}
+	}
+
+	private clearWordRows(): void {
+		this.wordRows.forEach(row => row.item.remove());
+		this.wordRows.clear();
+		this.listEl?.querySelectorAll('.word-frequency-skeleton').forEach(element => element.remove());
+	}
+
+	private async updateFrequencyRows(
+		frequencies: Map<string, number>,
+		scanId: number,
+		isFinal: boolean,
+		scannedWords = 0,
+	): Promise<void> {
+		const updateId = ++this.frequencyUpdateId;
+		const isCurrent = () => scanId === this.scanId && updateId === this.frequencyUpdateId;
+		if (!isCurrent()) {
+			return;
+		}
+		const entries = await this.createFrequencyEntries(frequencies, isCurrent);
+		if (!isCurrent()) {
+			return;
+		}
+		this.words = await this.sortWords(entries, isCurrent);
+		if (!isCurrent()) {
+			return;
+		}
+		this.listEl?.querySelectorAll('.word-frequency-skeleton').forEach(element => element.remove());
+		await this.renderWords(scanId, isFinal, scannedWords, updateId);
+	}
+
+	private async createFrequencyEntries(
+		frequencies: Map<string, number>,
+		isCurrent: () => boolean,
+	): Promise<WordFrequency[]> {
+		const words: WordFrequency[] = [];
+		let processed = 0;
+		for (const [word, count] of frequencies) {
+			words.push({ word, count });
+			processed++;
+			if (processed % YIELD_INTERVAL === 0) {
+				await yieldToUI();
+				if (!isCurrent()) {
+					return [];
+				}
+			}
+		}
+		return words;
+	}
+
+	private async sortWords(
+		words: WordFrequency[],
+		isCurrent: () => boolean,
+	): Promise<WordFrequency[]> {
+		if (words.length < 2) {
+			return words;
+		}
+		let source = words;
+		let target = new Array<WordFrequency>(words.length);
+		let comparisons = 0;
+		for (let width = 1; width < words.length; width *= 2) {
+			for (let start = 0; start < words.length; start += width * 2) {
+				const middle = Math.min(start + width, words.length);
+				const end = Math.min(start + width * 2, words.length);
+				let left = start;
+				let right = middle;
+				for (let output = start; output < end; output++) {
+					const leftWord = source[left];
+					const rightWord = source[right];
+					if (
+						left < middle &&
+						(right >= end || !rightWord ||
+							(leftWord && (
+								leftWord.count > rightWord.count ||
+								(leftWord.count === rightWord.count &&
+									leftWord.word.localeCompare(rightWord.word) <= 0)
+							)))
+					) {
+						if (leftWord) {
+							target[output] = leftWord;
+						}
+						left++;
+					} else if (rightWord) {
+						target[output] = rightWord;
+						right++;
+					}
+					comparisons++;
+					if (comparisons % YIELD_INTERVAL === 0) {
+						await new Promise(resolve => window.setTimeout(resolve, 0));
+						if (!isCurrent()) {
+							return [];
+						}
+					}
+				}
+			}
+			[source, target] = [target, source];
+		}
+		return source;
+	}
+
+	private async renderWords(
+		scanId = this.scanId,
+		isFinal = true,
+		scannedWords = 0,
+		frequencyUpdateId = this.frequencyUpdateId,
+	): Promise<void> {
+		if (!this.listEl || !this.statusEl || !this.searchInput) {
+			return;
+		}
+		const renderId = ++this.renderId;
+		const isCurrent = () =>
+			scanId === this.scanId &&
+			renderId === this.renderId &&
+			frequencyUpdateId === this.frequencyUpdateId;
+		const query = this.searchInput.value.trim().toLowerCase();
+		const shouldHideCommon = (this.excludingCommonWords || this.hidingCommonWords) && this.commonWords;
+		const visibleWords: WordFrequency[] = [];
+		const denominatorWords: WordFrequency[] = [];
+		for (let index = 0; index < this.words.length; index++) {
+			if (!isCurrent()) {
+				return;
+			}
+			const entry = this.words[index];
+			if (!entry) {
+				continue;
+			}
+			const isStopword = this.isStopword(entry.word);
+			const isCommon = shouldHideCommon && this.commonWords?.has(entry.word);
+			if (!isStopword && (!this.excludingCommonWords || !isCommon)) {
+				denominatorWords.push(entry);
+			}
+			if (
+				!isStopword &&
+				(!shouldHideCommon || !isCommon) &&
+				(!query || entry.word.includes(query))
+			) {
+				visibleWords.push(entry);
+			}
+			if ((index + 1) % YIELD_INTERVAL === 0) {
+				await new Promise(resolve => window.setTimeout(resolve, 0));
+			}
+		}
+
+		let totalCount = 0;
+		for (let index = 0; index < denominatorWords.length; index++) {
+			const entry = denominatorWords[index];
+			if (entry) {
+				totalCount += entry.count;
+			}
+			if ((index + 1) % YIELD_INTERVAL === 0) {
+				await new Promise(resolve => window.setTimeout(resolve, 0));
+			}
+		}
+		if (!isCurrent()) {
+			return;
+		}
+		this.statusEl.setText(isFinal
+			? `${visibleWords.length.toLocaleString()} words ${this.sourceLabel}`
+			: `Scanning ${scannedWords.toLocaleString()} words ${this.sourceLabel}`);
+		const liveWords = new Set(this.words.map(entry => entry.word));
+		const previousPositions = new Map<HTMLLIElement, number>();
+		this.visibleWordRows.forEach(row => {
+			if (row.isConnected && !row.hidden) {
+				previousPositions.set(row, row.getBoundingClientRect().top);
+			}
+		});
+		let rowPosition = 0;
+		for (let index = 0; index < this.words.length; index++) {
+			if (!isCurrent()) {
+				return;
+			}
+			const entry = this.words[index];
+			if (!entry) {
+				continue;
+			}
+			let row = this.wordRows.get(entry.word);
+			if (!row) {
+				row = this.createWordRow(entry.word);
+				this.wordRows.set(entry.word, row);
+			}
+			const isCommon = shouldHideCommon && this.commonWords?.has(entry.word);
+			const isStopword = this.isStopword(entry.word);
+			const isVisible = !isStopword &&
+				(!shouldHideCommon || !isCommon) &&
+				(!query || entry.word.includes(query));
+			row.item.hidden = !isVisible;
+			const currentRow = this.listEl.children.item(rowPosition);
+			if (currentRow !== row.item) {
+				this.listEl.insertBefore(row.item, currentRow);
+			}
+			row.count.setText(entry.count.toLocaleString());
+			const relativeFrequency = totalCount > 0 ? entry.count / totalCount : 0;
+			const relativePercent = relativeFrequency * 100;
+			row.bar.setAttribute(
+				'aria-label',
+				`Relative frequency: ${relativePercent.toFixed(2)}% of all words`,
+			);
+			row.barFill.style.width = `${relativePercent}%`;
+			rowPosition++;
+		}
+		if (isFinal) {
+			for (const [word, row] of this.wordRows) {
+				if (!liveWords.has(word)) {
+					this.rowVisibilityObserver?.unobserve(row.item);
+					this.visibleWordRows.delete(row.item);
+					row.item.remove();
+					this.wordRows.delete(word);
+				}
+			}
+		}
+		if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+			this.visibleWordRows.forEach(row => {
+				const previousTop = previousPositions.get(row);
+				if (previousTop === undefined || !row.isConnected || row.hidden) {
+					return;
+				}
+				const deltaY = previousTop - row.getBoundingClientRect().top;
+				if (Math.abs(deltaY) >= 1) {
+					row.animate(
+						[{ transform: `translateY(${deltaY}px)` }, { transform: 'translateY(0)' }],
+						{ duration: 180, easing: 'ease-out' },
+					);
+				}
+			});
+		}
+		if (visibleWords.length === 0 && isFinal) {
+			this.statusEl.setText(`No matching words ${this.sourceLabel}`);
+		}
+	}
+
+	private createWordRow(word: string): WordFrequencyRow {
+		const item = this.listEl!.createEl('li');
+		this.rowVisibilityObserver?.observe(item);
+		item.createSpan({ text: word, cls: 'word-frequency-word' });
+		const bar = item.createSpan({
+			cls: 'word-frequency-bar',
+			attr: { role: 'img', 'aria-label': 'Relative frequency: 0.00% of all words' },
+		});
+		const barFill = bar.createSpan({ cls: 'word-frequency-bar-fill' });
+		const count = item.createSpan({ text: '0', cls: 'word-frequency-count' });
+		return { item, bar, barFill, count };
+	}
+
+	private isStopword(word: string): boolean {
+		return this.stopwords?.has(word) === true || this.effectiveStopwords.has(word);
+	}
+
+	private showLargeFileAlert(): void {
+		if (this.hasShownLargeFileAlert) {
+			return;
+		}
+		this.hasShownLargeFileAlert = true;
+		const alert = document.body.createDiv({
+			cls: 'word-frequency-large-file-alert',
+			text: 'Some Markdown files larger than 512 KB were skipped.',
+			attr: { role: 'alert' },
+		});
+		this.largeFileAlert = alert;
+		this.largeFileAlertTimer = window.setTimeout(() => {
+			alert.remove();
+			this.largeFileAlert = undefined;
+			this.largeFileAlertTimer = undefined;
+		}, 8_000);
+	}
+}

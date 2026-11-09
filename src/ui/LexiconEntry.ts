@@ -1,5 +1,4 @@
-import { countTotalUsages } from '../utils/linguistics';
-import type { UsageCounter } from '../utils/linguistics';
+import type { UsageCounter } from '../utils/UsageIndex';
 
 export interface LexiconEntryInputs {
 	/** Details element containing this entry's editable fields. */
@@ -86,28 +85,66 @@ export function createLexiconEntry({
 		synonyms: [],
 	};
 
-	const updateSummaryRowUsageCount = () => {
-		const count = countTotalUsages(
-			[rowInputs.term.value, ...rowInputs.synonyms.map(synonym => synonym.value)],
-			getUsageCount,
-		);
-		summaryRowUsageCount.textContent = `${count}`;
-		summaryRowUsageCount.setAttribute('aria-label', `${count} total usages for this row`);
-		summaryRowUsageCount.title = `${count} total usages for this row`;
+	const showLoading = (element: HTMLSpanElement) => {
+		element.empty();
+		element.addClass('lexicon-count-loading');
+		element.setAttribute('aria-label', 'Calculating usage count');
+		element.removeAttribute('title');
+	};
+	const showCount = (element: HTMLSpanElement, text: string, label: string) => {
+		element.removeClass('lexicon-count-loading');
+		element.setText(text);
+		element.setAttribute('aria-label', label);
+		element.title = label;
+	};
+	let summaryUpdate = 0;
+	const updateSummaryRowUsageCount = async () => {
+		const update = ++summaryUpdate;
+		showLoading(summaryRowUsageCount);
+		try {
+			const counts = await Promise.all(
+				[rowInputs.term.value, ...rowInputs.synonyms.map(synonym => synonym.value)]
+					.map(value => getUsageCount(value)),
+			);
+			if (update !== summaryUpdate) {
+				return;
+			}
+			const count = counts.reduce((total, current) => total + current, 0);
+			showCount(summaryRowUsageCount, String(count), `${count} total usages for this row`);
+		} catch (error) {
+			console.error('Failed to calculate total row usages:', error);
+			if (update === summaryUpdate) {
+				showCount(summaryRowUsageCount, '!', 'Unable to calculate total row usages');
+			}
+		}
 	};
 	const termUsageCount = termField.field.createSpan({ cls: 'lexicon-synonym-usage' });
-	const updateTermUsageCount = () => {
-		const count = getUsageCount(rowInputs.term.value);
-		termUsageCount.textContent = `${count} usages`;
-		termUsageCount.setAttribute('aria-label', `${count} usages in Markdown files`);
-		termUsageCount.title = `${count} usages in Markdown files`;
-		summaryUsageCount.textContent = `${count}`;
-		summaryUsageCount.setAttribute('aria-label', `${count} usages in Markdown files`);
-		summaryUsageCount.title = `${count} usages in Markdown files`;
-		updateSummaryRowUsageCount();
+	let termUpdate = 0;
+	const updateTermUsageCount = async () => {
+		const update = ++termUpdate;
+		showLoading(termUsageCount);
+		showLoading(summaryUsageCount);
+		try {
+			const count = await getUsageCount(rowInputs.term.value);
+			if (update !== termUpdate) {
+				return;
+			}
+			showCount(termUsageCount, `${count} usages`, `${count} usages in Markdown files`);
+			showCount(summaryUsageCount, String(count), `${count} usages in Markdown files`);
+			await updateSummaryRowUsageCount();
+		} catch (error) {
+			console.error('Failed to calculate term usages:', error);
+			if (update === termUpdate) {
+				showCount(termUsageCount, '!', 'Unable to calculate usages');
+				showCount(summaryUsageCount, '!', 'Unable to calculate total row usages');
+			}
+		}
 	};
-	rowInputs.term.addEventListener('input', updateTermUsageCount);
-	updateTermUsageCount();
+	rowInputs.term.addEventListener('input', () => {
+		void updateTermUsageCount();
+		void updateSummaryRowUsageCount();
+	});
+	void updateTermUsageCount();
 
 	rowInputs.term.addEventListener('input', () => {
 		summaryTerm.textContent = rowInputs.term.value || 'New vocabulary item';
@@ -139,12 +176,24 @@ export function createLexiconEntry({
 			cls: 'lexicon-synonym-usage',
 			attr: { 'aria-live': 'polite' },
 		});
-		const updateUsageCount = () => {
-			const count = getUsageCount(input.value);
-			usageCount.textContent = String(count);
-			usageCount.setAttribute('aria-label', `${count} synonym usages in Markdown files`);
-			usageCount.title = `${count} synonym usages in Markdown files`;
-			updateSummaryRowUsageCount();
+		let synonymUpdate = 0;
+		const updateUsageCount = async () => {
+			const update = ++synonymUpdate;
+			showLoading(usageCount);
+			showLoading(summaryRowUsageCount);
+			try {
+				const count = await getUsageCount(input.value);
+				if (update !== synonymUpdate) {
+					return;
+				}
+				showCount(usageCount, String(count), `${count} synonym usages in Markdown files`);
+				await updateSummaryRowUsageCount();
+			} catch (error) {
+				console.error('Failed to calculate synonym usages:', error);
+				if (update === synonymUpdate) {
+					showCount(usageCount, '!', 'Unable to calculate synonym usages');
+				}
+			}
 		};
 		const swapButton = synonymRow.createEl('button', {
 			text: 'Swap with term',
@@ -169,11 +218,14 @@ export function createLexiconEntry({
 			if (inputIndex !== -1) {
 				rowInputs.synonyms.splice(inputIndex, 1);
 			}
-			updateSummaryRowUsageCount();
+			void updateSummaryRowUsageCount();
 		});
 		rowInputs.synonyms.push(input);
-		input.addEventListener('input', updateUsageCount);
-		updateUsageCount();
+		input.addEventListener('input', () => {
+			void updateUsageCount();
+			void updateSummaryRowUsageCount();
+		});
+		void updateUsageCount();
 	};
 
 	const synonyms = initialSynonyms ?? (
