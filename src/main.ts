@@ -18,7 +18,7 @@ export default class ObsidianVocabularyPlugin extends Plugin {
 	async onload() {
 		this.registerView(
 			WORD_FREQUENCY_VIEW_TYPE,
-			leaf => new WordFrequencyView(leaf),
+			leaf => new WordFrequencyView(leaf, this.manifest.dir),
 		);
 		this.addCommand({
 			id: 'open-word-frequency',
