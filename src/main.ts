@@ -30,6 +30,10 @@ export default class MyPlugin extends Plugin {
 			callback: () => new LexiconModal(this.app).open(),
 		});
 
+		this.addRibbonIcon('book-open', 'Open lexicon modal', () => {
+			new LexiconModal(this.app).open();
+		});
+
 		// Prints All Files in Vault
 		this.addCommand({
 			id: 'print-files',
