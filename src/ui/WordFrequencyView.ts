@@ -6,7 +6,6 @@ import type { GroupingMode, UsageIndex } from '../utils/UsageIndex';
 export const WORD_FREQUENCY_VIEW_TYPE = 'obsidian-vocabulary-word-frequency';
 const REFRESH_INTERVAL_MS = 30_000;
 const YIELD_INTERVAL = 2_000;
-const RENDER_BATCH_SIZE = 100;
 
 interface WordFrequency {
 	word: string;
@@ -46,6 +45,8 @@ export class WordFrequencyView extends ItemView {
 	private scanId = 0;
 	private renderId = 0;
 	private frequencyUpdateId = 0;
+	private rowVisibilityObserver?: IntersectionObserver;
+	private visibleWordRows = new Set<HTMLLIElement>();
 	private hasShownLargeFileAlert = false;
 	private largeFileAlert?: HTMLElement;
 	private largeFileAlertTimer?: number;
@@ -164,6 +165,16 @@ export class WordFrequencyView extends ItemView {
 			attr: { role: 'status', 'aria-live': 'polite' },
 		});
 		this.listEl = this.contentEl.createEl('ul', { cls: 'word-frequency-list' });
+		this.rowVisibilityObserver = new IntersectionObserver(entries => {
+			entries.forEach(entry => {
+				const row = entry.target as HTMLLIElement;
+				if (entry.isIntersecting) {
+					this.visibleWordRows.add(row);
+				} else {
+					this.visibleWordRows.delete(row);
+				}
+			});
+		}, { root: this.listEl });
 		this.showSkeleton();
 
 		this.vaultEventRefs.push(this.app.vault.on('create', file => {
@@ -225,6 +236,9 @@ export class WordFrequencyView extends ItemView {
 		}
 		this.largeFileAlert?.remove();
 		this.largeFileAlert = undefined;
+		this.rowVisibilityObserver?.disconnect();
+		this.rowVisibilityObserver = undefined;
+		this.visibleWordRows.clear();
 		this.vaultEventRefs.forEach(eventRef => this.app.vault.offref(eventRef));
 		this.vaultEventRefs = [];
 		if (this.metadataEventRef) {
@@ -558,6 +572,12 @@ export class WordFrequencyView extends ItemView {
 			? `${visibleWords.length.toLocaleString()} words ${this.sourceLabel}`
 			: `Scanning ${scannedWords.toLocaleString()} words ${this.sourceLabel}`);
 		const liveWords = new Set(this.words.map(entry => entry.word));
+		const previousPositions = new Map<HTMLLIElement, number>();
+		this.visibleWordRows.forEach(row => {
+			if (row.isConnected && !row.hidden) {
+				previousPositions.set(row, row.getBoundingClientRect().top);
+			}
+		});
 		let rowPosition = 0;
 		for (let index = 0; index < this.words.length; index++) {
 			if (!isCurrent()) {
@@ -589,17 +609,31 @@ export class WordFrequencyView extends ItemView {
 			);
 			row.barFill.style.width = `${relativePercent}%`;
 			rowPosition++;
-			if ((index + 1) % RENDER_BATCH_SIZE === 0) {
-				await yieldToUI();
-			}
 		}
 		if (isFinal) {
 			for (const [word, row] of this.wordRows) {
 				if (!liveWords.has(word)) {
+					this.rowVisibilityObserver?.unobserve(row.item);
+					this.visibleWordRows.delete(row.item);
 					row.item.remove();
 					this.wordRows.delete(word);
 				}
 			}
+		}
+		if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+			this.visibleWordRows.forEach(row => {
+				const previousTop = previousPositions.get(row);
+				if (previousTop === undefined || !row.isConnected || row.hidden) {
+					return;
+				}
+				const deltaY = previousTop - row.getBoundingClientRect().top;
+				if (Math.abs(deltaY) >= 1) {
+					row.animate(
+						[{ transform: `translateY(${deltaY}px)` }, { transform: 'translateY(0)' }],
+						{ duration: 180, easing: 'ease-out' },
+					);
+				}
+			});
 		}
 		if (visibleWords.length === 0 && isFinal) {
 			this.statusEl.setText(`No matching words ${this.sourceLabel}`);
@@ -608,6 +642,7 @@ export class WordFrequencyView extends ItemView {
 
 	private createWordRow(word: string): WordFrequencyRow {
 		const item = this.listEl!.createEl('li');
+		this.rowVisibilityObserver?.observe(item);
 		item.createSpan({ text: word, cls: 'word-frequency-word' });
 		const bar = item.createSpan({
 			cls: 'word-frequency-bar',
