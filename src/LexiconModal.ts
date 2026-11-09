@@ -1,4 +1,12 @@
 import { App, Modal, Notice } from 'obsidian';
+import {
+	countTotalUsages,
+	createUsageCounter,
+	normalizeSynonym,
+	replaceSynonymWords,
+	scanRefactorCandidates,
+} from './linguistics';
+import type { SynonymReplacementRule } from './linguistics';
 
 interface LexiconEntryInputs {
 	term: HTMLInputElement;
@@ -6,24 +14,62 @@ interface LexiconEntryInputs {
 	synonyms: HTMLInputElement[];
 }
 
-// Treat "#word" in a Markdown tag the same as "word" in a lexicon field.
-function normalizeSynonym(synonym: string): string {
-	return synonym.trim().replace(/^#+/, '').toLowerCase();
+class ConfirmationModal extends Modal {
+	private settled = false;
+
+	constructor(
+		app: App,
+		private title: string,
+		private message: string,
+		private confirmLabel: string,
+		private onDecision: (confirmed: boolean) => void,
+	) {
+		super(app);
+	}
+
+	onOpen() {
+		this.contentEl.createEl('h2', { text: this.title });
+		this.contentEl.createEl('p', { text: this.message });
+
+		const actions = this.contentEl.createDiv({ cls: 'modal-actions' });
+		actions.createEl('button', { text: 'Cancel' }).addEventListener('click', () => {
+			this.finish(false);
+		});
+		actions.createEl('button', {
+			text: this.confirmLabel,
+			cls: 'mod-cta',
+		}).addEventListener('click', () => {
+			this.finish(true);
+		});
+	}
+
+	onClose() {
+		if (!this.settled) {
+			this.settled = true;
+			this.onDecision(false);
+		}
+		this.contentEl.empty();
+	}
+
+	private finish(confirmed: boolean) {
+		if (this.settled) {
+			return;
+		}
+		this.settled = true;
+		this.onDecision(confirmed);
+		this.close();
+	}
 }
 
-// Advance one character after each match so overlapping substrings count too.
-function countOccurrences(text: string, query: string): number {
-	if (!query) {
-		return 0;
-	}
-
-	let count = 0;
-	let offset = 0;
-	while ((offset = text.indexOf(query, offset)) !== -1) {
-		count++;
-		offset++;
-	}
-	return count;
+function confirmAction(
+	app: App,
+	title: string,
+	message: string,
+	confirmLabel: string,
+): Promise<boolean> {
+	return new Promise(resolve => {
+		new ConfirmationModal(app, title, message, confirmLabel, resolve).open();
+	});
 }
 
 export class LexiconModal extends Modal {
@@ -59,53 +105,11 @@ export class LexiconModal extends Modal {
 			new Notice('Error loading vocabulary data.');
 		}
 
-		// Keep hashtag counts separate from prose counts to avoid counting tags twice.
-		const synonymUsages = new Map<string, number>();
-		const regularText: string[] = [];
-		const markdownFiles = this.app.vault.getMarkdownFiles();
+		let getUsageCount: (value: string) => number;
 		try {
-			for (const [i, file] of markdownFiles.entries()) {
-				loadingIndicator.setText(`Scanning Markdown files (${i + 1}/${markdownFiles.length})...`);
-				const content = await this.app.vault.cachedRead(file);
-				// Obsidian's cache identifies actual hashtags, including their source positions.
-				const markdownTags = this.app.metadataCache.getFileCache(file)?.tags ?? [];
-
-				markdownTags.forEach(({ tag: markdownTag }) => {
-					const normalizedSynonym = normalizeSynonym(markdownTag);
-					if (!normalizedSynonym) {
-						return;
-					}
-
-					// Count each part of a nested tag as well as the full tag.
-					const synonymNames = new Set([
-						normalizedSynonym,
-						...normalizedSynonym.split('/'),
-					]);
-					synonymNames.forEach(synonym => {
-						synonymUsages.set(synonym, (synonymUsages.get(synonym) ?? 0) + 1);
-					});
-				});
-
-				let prose = '';
-				let offset = 0;
-				// Sort ranges so we can mask them in order without changing later offsets.
-				const markdownTagRanges = markdownTags
-					.map(({ position }) => ({
-						start: position.start.offset,
-						end: position.end.offset,
-					}))
-					.sort((a, b) => a.start - b.start);
-				// Mask parsed hashtags so the prose scan won't count them twice.
-				markdownTagRanges.forEach(({ start, end }) => {
-					const rangeStart = Math.min(content.length, Math.max(offset, start));
-					const rangeEnd = Math.min(content.length, Math.max(rangeStart, end));
-					prose += content.slice(offset, rangeStart);
-					prose += ' '.repeat(rangeEnd - rangeStart);
-					offset = rangeEnd;
-				});
-				prose += content.slice(offset);
-				regularText.push(prose.toLowerCase());
-			}
+			getUsageCount = await createUsageCounter(this.app, (completed, total) => {
+				loadingIndicator.setText(`Scanning Markdown files (${completed}/${total})...`);
+			});
 		} catch (error) {
 			// Don't show partial counts; they would look complete but miss unreadable files.
 			console.error('Failed to scan Markdown files for synonym usages:', error);
@@ -114,19 +118,17 @@ export class LexiconModal extends Modal {
 			return;
 		}
 
-		// Both term and synonym counters use the same tag-plus-prose matching rules.
-		const getUsageCount = (value: string): number => {
-			const normalizedValue = normalizeSynonym(value);
-			return (synonymUsages.get(normalizedValue) ?? 0) + regularText.reduce(
-				(total, text) => total + countOccurrences(text, normalizedValue),
-				0,
-			);
-		};
-
 		loadingIndicator.remove();
 		const entriesEl = contentEl.createDiv({ cls: 'lexicon-entries' });
 		// Keep the inputs together so additions, removals, and saving use the same rows.
 		const entries: LexiconEntryInputs[] = [];
+		const refreshUsageCounts = async (onProgress: (completed: number, total: number) => void) => {
+			getUsageCount = await createUsageCounter(this.app, onProgress);
+			entries.forEach(entry => {
+				entry.term.dispatchEvent(new Event('input'));
+				entry.synonyms.forEach(synonym => synonym.dispatchEvent(new Event('input')));
+			});
+		};
 
 		// Build one collapsible entry; existing entries start closed, new ones open.
 		const addEntry = (
@@ -177,8 +179,10 @@ export class LexiconModal extends Modal {
 
 			const updateSummaryRowUsageCount = () => {
 				// Recalculate from current inputs so edits and removals are reflected immediately.
-				const count = getUsageCount(rowInputs.term.value) +
-					rowInputs.synonyms.reduce((total, synonym) => total + getUsageCount(synonym.value), 0);
+				const count = countTotalUsages(
+					[rowInputs.term.value, ...rowInputs.synonyms.map(synonym => synonym.value)],
+					getUsageCount,
+				);
 				summaryRowUsageCount.textContent = `${count}`;
 				summaryRowUsageCount.setAttribute('aria-label', `${count} total usages for this row`);
 				summaryRowUsageCount.title = `${count} total usages for this row`;
@@ -264,7 +268,7 @@ export class LexiconModal extends Modal {
 			synonyms.forEach(synonym => addSynonym(synonym));
 
 			const addSynonymButton = synonymField.createEl('button', {
-				text: 'Add Synonym',
+				text: 'Add synonym',
 				attr: { type: 'button' },
 			});
 			addSynonymButton.addEventListener('click', () => addSynonym());
@@ -289,10 +293,138 @@ export class LexiconModal extends Modal {
 			text: 'Save updates',
 			cls: 'mod-cta',
 		});
-		actionsDiv.createEl('button', {
+		const refactorButton = actionsDiv.createEl('button', {
 			text: 'Refactor',
 			attr: { type: 'button' },
 		});
+		refactorButton.onclick = async () => {
+			const termRules = new Map<string, string>();
+			const rules: SynonymReplacementRule[] = [];
+			let invalidEntry = '';
+
+			entries.forEach(entry => {
+				const term = entry.term.value.trim();
+				if (!term) {
+					if (entry.synonyms.some(synonym => synonym.value.trim())) {
+						invalidEntry = 'Enter a term for every entry that has synonyms before refactoring.';
+					}
+					return;
+				}
+
+				entry.synonyms.forEach(synonymInput => {
+					const synonym = synonymInput.value.trim();
+					const normalizedSynonym = normalizeSynonym(synonym);
+					if (!normalizedSynonym || normalizedSynonym === normalizeSynonym(term)) {
+						return;
+					}
+
+					const existingTerm = termRules.get(normalizedSynonym);
+					if (existingTerm && existingTerm.toLowerCase() !== term.toLowerCase()) {
+						invalidEntry = `The synonym "${synonym}" is assigned to multiple terms.`;
+					}
+					if (!existingTerm) {
+						termRules.set(normalizedSynonym, term);
+						rules.push({ synonym, term });
+					}
+				});
+			});
+
+			if (invalidEntry) {
+				new Notice(invalidEntry);
+				return;
+			}
+
+			if (rules.length === 0) {
+				new Notice('Add a term and at least one synonym before refactoring.');
+				return;
+			}
+
+			refactorButton.disabled = true;
+			const progress = contentEl.createEl('p', { cls: 'loading-text' });
+			try {
+				const scan = await scanRefactorCandidates(this.app, rules, (completed, total) => {
+					progress.setText(`Checking Markdown files (${completed}/${total})...`);
+				});
+
+				const approvedWords = new Set<string>();
+				for (const { word, term } of scan.largerWords) {
+					const confirmed = await confirmAction(
+						this.app,
+						'Replace a matching word?',
+						`"${word}" contains a synonym. Replace every occurrence of "${word}" with "${term}"?`,
+						'Replace word',
+					);
+					if (confirmed) {
+						approvedWords.add(word.toLowerCase());
+					}
+				}
+
+				const changedFiles = scan.files.filter(({ content }) =>
+					replaceSynonymWords(content, rules, approvedWords) !== content,
+				);
+				if (changedFiles.length === 0) {
+					new Notice('No matching words were found to refactor.');
+					return;
+				}
+
+				const confirmed = await confirmAction(
+					this.app,
+					'Confirm refactor',
+					`Replace matching synonyms in ${changedFiles.length} Markdown file(s)? Exact synonym matches and approved larger words will be replaced.`,
+					'Refactor files',
+				);
+				if (!confirmed) {
+					return;
+				}
+
+				let updatedFiles = 0;
+				try {
+					for (const { file } of changedFiles) {
+						progress.setText(`Refactoring Markdown files (${updatedFiles + 1}/${changedFiles.length})...`);
+						const currentContent = await this.app.vault.read(file);
+						const updatedContent = replaceSynonymWords(currentContent, rules, approvedWords);
+						if (updatedContent !== currentContent) {
+							await this.app.vault.modify(file, updatedContent);
+						}
+						updatedFiles++;
+					}
+				} catch (error) {
+					console.error('Refactor stopped before all files were updated:', error);
+					new Notice(`Refactor stopped after updating ${updatedFiles} of ${changedFiles.length} files.`);
+					if (updatedFiles > 0) {
+						try {
+							progress.setText('Refreshing usage counts...');
+							await refreshUsageCounts((completed, total) => {
+								progress.setText(`Refreshing usage counts (${completed}/${total})...`);
+							});
+						} catch (refreshError) {
+							console.error('Unable to refresh usage counts after a partial refactor:', refreshError);
+							new Notice('Some files changed, but usage counts could not be refreshed.');
+						}
+					}
+					return;
+				}
+
+				progress.setText('Refreshing usage counts...');
+				try {
+					await refreshUsageCounts((completed, total) => {
+						progress.setText(`Refreshing usage counts (${completed}/${total})...`);
+					});
+				} catch (error) {
+					console.error('Refactor completed, but usage counts could not be refreshed:', error);
+					new Notice('Refactor completed, but usage counts could not be refreshed. Close and reopen the modal to update them.');
+					return;
+				}
+
+				new Notice(`Refactor complete. Updated ${updatedFiles} Markdown file(s).`);
+			} catch (error) {
+				console.error('Failed to prepare lexicon refactor:', error);
+				new Notice(error instanceof Error ? error.message : 'Failed to prepare refactor.');
+			} finally {
+				progress.remove();
+				refactorButton.disabled = false;
+			}
+		};
 		saveButton.onclick = async () => {
 			// Keep the existing comma-delimited file format and omit entirely blank rows.
 			const rowsData = entries
