@@ -14,6 +14,8 @@ import {
 	SampleSettingTab,
 } from './settings';
 
+import { TableModal } from './LexiconModal';
+
 // Remember to rename these classes and interfaces!
 
 export default class MyPlugin extends Plugin {
@@ -22,26 +24,10 @@ export default class MyPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
 		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView =
-					this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-				return false;
-			},
+			id: 'open-lexicon-modal',
+			name: 'Open lexicon modal',
+			callback: () => new TableModal(this.app).open(),
 		});
 
 		// Prints All Files in Vault
