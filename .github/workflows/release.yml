@@ -2,18 +2,18 @@ name: Release
 
 on:
     push:
-        tags:
-            - 'release'
+        branches:
+            - release
 
 jobs:
-    build:
+    release:
         runs-on: ubuntu-latest
         permissions:
             contents: write
-            id-token: write
-            attestations: write
         steps:
             - uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
 
             - name: Use Node.js
               uses: actions/setup-node@v6
@@ -21,30 +21,13 @@ jobs:
                   node-version: 24
                   cache: 'npm'
 
+            - name: Install dependencies
+              run: npm ci
+
             - name: Build plugin
-              run: |
-                  npm ci
-                  npm run build
+              run: npm run build
 
-            - name: Check for optional styles
-              id: styles
-              run: |
-                  [ -f styles.css ] && echo "exists=true" >> "$GITHUB_OUTPUT" || echo "exists=false" >> "$GITHUB_OUTPUT"
-
-            - name: Attest build provenance
-              uses: actions/attest@v4
-              with:
-                  subject-path: |
-                      main.js
-                      ${{ steps.styles.outputs.exists == 'true' && 'styles.css' || '' }}
-
-            - name: Create release
+            - name: Create semantic release
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              run: |
-                  tag="${GITHUB_REF#refs/tags/}"
-
-                  gh release create "$tag" \
-                    --title="$tag" \
-                    --draft \
-                    main.js manifest.json ${{ steps.styles.outputs.exists == 'true' && 'styles.css' || '' }}
+              run: npx semantic-release

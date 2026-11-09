@@ -27,16 +27,13 @@ src/
 - Run `npm run build` for a production build and type check.
 - Run `npm run lint` to lint the project.
 
-## Releasing new releases
+## Releasing
 
-- Update your `manifest.json` with your new version number, such as `1.0.1`, and the minimum Obsidian version required for your latest release.
-- Update your `versions.json` file with `"new-plugin-version": "minimum-obsidian-version"` so older versions of Obsidian can download an older version of your plugin that's compatible.
-- Create new GitHub release using your new version number as the "Tag version". Use the exact version number, don't include a prefix `v`. See here for an example: https://github.com/obsidianmd/obsidian-sample-plugin/releases
-- Upload the files `manifest.json`, `main.js`, `styles.css` as binary attachments. Note: The manifest.json file must be in two places, first the root path of your repository and also in the release.
-- Publish the release.
+Push or merge release-worthy commits to the `release` branch. GitHub Actions uses semantic-release to analyze commit messages, update the package and Obsidian plugin versions, create a version tag without a `v` prefix, and publish a GitHub release with `main.js`, `manifest.json`, and `styles.css`.
 
-> You can simplify the version bump process by running `npm version patch`, `npm version minor` or `npm version major` after updating `minAppVersion` manually in `manifest.json`.
-> The command will bump version in `manifest.json` and `package.json`, and add the entry for the new version to `versions.json`
+Use Conventional Commit messages: `fix:` creates a patch release, `feat:` creates a minor release, and a breaking change creates a major release. Update `minAppVersion` in `manifest.json` on the `release` branch when a release requires a newer Obsidian version.
+
+The workflow needs repository Actions permissions that allow it to write contents so it can push the release metadata and create GitHub releases.
 
 ## Adding your plugin to the community plugin list
 
