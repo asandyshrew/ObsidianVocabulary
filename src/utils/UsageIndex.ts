@@ -9,6 +9,10 @@ const YIELD_INTERVAL = 2_000;
 export type GroupingMode = 'none' | 'stem' | 'lemma';
 export type UsageCounter = (value: string) => Promise<number>;
 export type WordFrequencyProgress = (completed: number, total: number) => void;
+export type WordFrequencyUpdate = (
+	frequencies: Map<string, number>,
+	scannedWords: number,
+) => void | Promise<void>;
 
 interface IndexedFile {
 	mtime: number;
@@ -52,6 +56,11 @@ export class UsageIndex {
 	private hasScanned = false;
 	private dataVersion = 0;
 	private progressListeners = new Set<WordFrequencyProgress>();
+	private frequencyListeners = new Set<{
+		mode: GroupingMode;
+		filePath?: string;
+		onUpdate: WordFrequencyUpdate;
+	}>();
 
 	constructor(private app: App) {}
 
@@ -90,8 +99,20 @@ export class UsageIndex {
 		mode: GroupingMode = 'none',
 		file?: TFile,
 		onProgress?: WordFrequencyProgress,
+		onUpdate?: WordFrequencyUpdate,
 	): Promise<Map<string, number>> {
-		await this.refresh(onProgress);
+		const listener = onUpdate ? { mode, filePath: file?.path, onUpdate } : undefined;
+		if (listener) {
+			this.frequencyListeners.add(listener);
+		}
+		try {
+			await this.refresh(onProgress);
+		} finally {
+			if (listener) {
+				this.frequencyListeners.delete(listener);
+			}
+		}
+
 		const result = new Map<string, number>();
 		const indexedFiles = file
 			? [this.files.get(file.path)].filter((indexed): indexed is IndexedFile => indexed !== undefined)
@@ -180,6 +201,7 @@ export class UsageIndex {
 			}
 		});
 
+		let totalScannedWords = 0;
 		for (const [index, file] of markdownFiles.entries()) {
 			const { mtime, size } = file.stat;
 			const cached = this.files.get(file.path);
@@ -188,9 +210,15 @@ export class UsageIndex {
 				this.skippedFiles.add(file.path);
 			} else if (cached?.mtime !== mtime || cached.size !== size) {
 				const content = await this.app.vault.cachedRead(file);
-				const indexed = await this.indexFile(file, content, mtime, size);
+				let fileScannedWords = 0;
+				const indexed = await this.indexFile(file, content, mtime, size, async (scannedWords, counts) => {
+					totalScannedWords += scannedWords - fileScannedWords;
+					fileScannedWords = scannedWords;
+					await this.publishWordFrequencies(file.path, counts, totalScannedWords);
+				});
 				this.files.set(file.path, indexed);
 				this.skippedFiles.delete(file.path);
+				await this.publishWordFrequencies(undefined, undefined, totalScannedWords);
 			}
 
 			this.progressListeners.forEach(listener => listener(index + 1, markdownFiles.length));
@@ -200,6 +228,7 @@ export class UsageIndex {
 		}
 
 		this.hasScanned = true;
+		await this.publishWordFrequencies(undefined, undefined, totalScannedWords);
 	}
 
 	private hasForceScanTag(file: TFile): boolean {
@@ -214,6 +243,10 @@ export class UsageIndex {
 		content: string,
 		mtime: number,
 		size: number,
+		onProgress: (
+			scannedWords: number,
+			counts: Record<GroupingMode, Map<string, number>>,
+		) => void | Promise<void>,
 	): Promise<IndexedFile> {
 		const wordCounts: Record<GroupingMode, Map<string, number>> = {
 			none: new Map(),
@@ -232,8 +265,12 @@ export class UsageIndex {
 			if (processedTokens % YIELD_INTERVAL === 0) {
 				await yieldToUI();
 			}
+			if (processedTokens % 100 === 0) {
+				await onProgress(processedTokens, wordCounts);
+			}
 			token = tokenPattern.exec(content);
 		}
+		await onProgress(processedTokens, wordCounts);
 
 		const markdownTags = this.app.metadataCache.getFileCache(file)?.tags ?? [];
 		const tagUsages = new Map<string, number>();
@@ -280,6 +317,42 @@ export class UsageIndex {
 		prose += content.slice(offset);
 
 		return { mtime, size, wordCounts, prose: prose.toLowerCase(), tagUsages };
+	}
+
+	private async publishWordFrequencies(
+		partialFilePath?: string,
+		partialCounts?: Record<GroupingMode, Map<string, number>>,
+		scannedWords = 0,
+	): Promise<void> {
+		for (const listener of this.frequencyListeners) {
+			if (listener.filePath && partialFilePath && listener.filePath !== partialFilePath) {
+				continue;
+			}
+			const counts = new Map<string, number>();
+			let processed = 0;
+			for (const [path, indexed] of this.files) {
+				if (path === partialFilePath || (listener.filePath && path !== listener.filePath)) {
+					continue;
+				}
+				for (const [word, count] of indexed.wordCounts[listener.mode]) {
+					counts.set(word, (counts.get(word) ?? 0) + count);
+					processed++;
+					if (processed % YIELD_INTERVAL === 0) {
+						await yieldToUI();
+					}
+				}
+			}
+			if (partialCounts && (!listener.filePath || listener.filePath === partialFilePath)) {
+				for (const [word, count] of partialCounts[listener.mode]) {
+					counts.set(word, (counts.get(word) ?? 0) + count);
+					processed++;
+					if (processed % YIELD_INTERVAL === 0) {
+						await yieldToUI();
+					}
+				}
+			}
+			await listener.onUpdate(counts, scannedWords);
+		}
 	}
 
 	private async countUsage(value: string): Promise<number> {

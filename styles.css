@@ -277,6 +277,32 @@ If your plugin does not need CSS, delete this file.
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
+.word-frequency-skeleton {
+	gap: 1rem;
+}
+
+.word-frequency-skeleton-word,
+.word-frequency-skeleton-bar,
+.word-frequency-skeleton-count {
+	display: block;
+	height: 0.8rem;
+	border-radius: var(--radius-s);
+	background-color: var(--background-modifier-border);
+	animation: word-frequency-pulse 1.2s ease-in-out infinite;
+}
+
+.word-frequency-skeleton-word {
+	width: 35%;
+}
+
+.word-frequency-skeleton-bar {
+	flex: 1 1 3rem;
+}
+
+.word-frequency-skeleton-count {
+	width: 2rem;
+}
+
 .word-frequency-word {
 	flex: 0 1 auto;
 	min-width: 0;
@@ -340,5 +366,11 @@ If your plugin does not need CSS, delete this file.
 @keyframes word-frequency-spin {
 	to {
 		transform: rotate(360deg);
+	}
+}
+
+@keyframes word-frequency-pulse {
+	50% {
+		opacity: 0.45;
 	}
 }
