@@ -4,7 +4,7 @@ import {
 	findCommonWordCandidates,
 	loadCommonWords,
 	normalizeSynonym,
-	replaceSynonymWords,
+	createSynonymReplacer,
 	scanRefactorCandidates,
 } from '../utils/linguistics';
 import type { SynonymReplacementRule } from '../utils/linguistics';
@@ -13,9 +13,13 @@ import { createLexiconEntry } from './LexiconEntry';
 import type { LexiconEntryInputs } from './LexiconEntry';
 
 export interface LexiconModalOptions {
+	/** Vault-relative lexicon data path; defaults to vocabulary.lexicon. */
 	fileName?: string;
+	/** Vault-relative plugin directory containing resources/common_words.txt. */
 	pluginDirectory?: string;
+	/** Mutable normalized list of common terms already approved by the user. */
 	confirmedCommonTerms: string[];
+	/** Persists changes to the common-term confirmation list. */
 	persistCommonTermConfirmations: () => Promise<void>;
 }
 
@@ -123,6 +127,8 @@ export class LexiconModal extends Modal {
 			}));
 		};
 
+		// Existing serialized rows open collapsed; an empty file starts with two
+		// editable entries to make adding the first terms straightforward.
 		if (rawContent.trim().length > 0) {
 			const lines = rawContent.split(/\r?\n/).filter(line => line.trim().length > 0);
 			lines.forEach(line => {
@@ -151,6 +157,10 @@ export class LexiconModal extends Modal {
 		const pluginDirectory = this.pluginDirectory;
 		const modalEl = this.modalEl;
 
+		/**
+		 * Validate a selected group, request approvals, then replace synonyms in
+		 * Markdown files. Passing one entry scopes the action to its row button.
+		 */
 		async function refactorEntries(
 			targetEntries: LexiconEntryInputs[],
 			button: HTMLButtonElement,
@@ -196,6 +206,7 @@ export class LexiconModal extends Modal {
 				new Notice('Add a term and at least one synonym before refactoring.');
 				return;
 			}
+			const replaceSynonymWords = createSynonymReplacer(rules);
 
 			button.disabled = true;
 			const progress = contentEl.createEl('p', { cls: 'loading-text' });
@@ -241,7 +252,7 @@ export class LexiconModal extends Modal {
 				}
 
 				const changedFiles = scan.files.filter(({ content }) =>
-					replaceSynonymWords(content, rules, approvedWords) !== content,
+					replaceSynonymWords(content, approvedWords) !== content,
 				);
 				if (changedFiles.length === 0) {
 					new Notice('No matching words were found to refactor.');
@@ -265,7 +276,7 @@ export class LexiconModal extends Modal {
 					for (const { file } of changedFiles) {
 						progress.setText(`Refactoring Markdown files (${updatedFiles + 1}/${changedFiles.length})...`);
 						const currentContent = await app.vault.read(file);
-						const updatedContent = replaceSynonymWords(currentContent, rules, approvedWords);
+						const updatedContent = replaceSynonymWords(currentContent, approvedWords);
 						if (updatedContent !== currentContent) {
 							await app.vault.modify(file, updatedContent);
 						}
@@ -310,6 +321,10 @@ export class LexiconModal extends Modal {
 				refactorButton.disabled = false;
 			}
 		}
+		/**
+		 * Validate synonym ownership and common-word confirmations before writing
+		 * the current rows in the lexicon's existing comma-delimited format.
+		 */
 		saveButton.onclick = async () => {
 			const synonymTerms = new Map<string, { synonym: string; term: string }>();
 			saveErrors.forEach(error => {

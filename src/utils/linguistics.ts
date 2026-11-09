@@ -14,7 +14,9 @@ export interface SynonymReplacementRule {
 }
 
 export interface CommonWordCandidate {
+	/** Complete term or synonym value checked against the common-word set. */
 	value: string;
+	/** Identifies which editor field supplied the candidate. */
 	type: 'term' | 'synonym';
 }
 
@@ -28,6 +30,30 @@ export interface RefactorScan {
 	files: Array<{ file: TFile; content: string }>;
 	largerWords: Array<{ word: string; term: string }>;
 }
+
+interface SynonymMatch {
+	/** Canonical term associated with the matched synonym, if any. */
+	term?: string;
+	/** Whether a matched synonym covers the entire candidate word. */
+	exactMatch: boolean;
+	/** Whether matches in the candidate word resolve to different terms. */
+	conflict: boolean;
+}
+
+/** Trie node used by the compiled multi-pattern synonym matcher. */
+interface SynonymMatcherNode {
+	/** Edges to child nodes, keyed by the next synonym character. */
+	transitions: Map<string, number>;
+	/** Fallback state used when the current character has no outgoing edge. */
+	failure: number;
+	/** Next suffix state that has a matching synonym output. */
+	outputLink: number;
+	/** Rules ending at this node. */
+	rules: Array<{ synonym: string; term: string }>;
+}
+
+/** Matches all configured synonyms contained in a candidate word. */
+type SynonymMatcher = (word: string) => SynonymMatch;
 
 /**
  * Adds the usage count for each value, including repeated values if present.
@@ -78,6 +104,10 @@ export async function loadCommonWords(app: App, pluginDirectory?: string): Promi
 /**
  * Returns each non-empty term or synonym whose complete value is a common word.
  * Matching ignores case and surrounding whitespace but does not match substrings.
+ *
+ * @param candidates Values collected from editable term and synonym fields.
+ * @param commonWords Lowercase exact-word set loaded from the resource file.
+ * @returns Candidates whose normalized values exist in the set.
  */
 export function findCommonWordCandidates(
 	candidates: CommonWordCandidate[],
@@ -108,6 +138,107 @@ function countOccurrences(text: string, query: string): number {
 }
 
 /**
+ * Builds an Aho–Corasick matcher so each word is scanned once rather than
+ * testing it against every synonym rule.
+ */
+function createSynonymMatcher(rules: SynonymReplacementRule[]): SynonymMatcher {
+	const nodes: SynonymMatcherNode[] = [{
+		transitions: new Map(),
+		failure: 0,
+		outputLink: 0,
+		rules: [],
+	}];
+	const getNode = (index: number): SynonymMatcherNode => {
+		const node = nodes[index];
+		if (!node) {
+			throw new Error('Invalid synonym matcher state.');
+		}
+		return node;
+	};
+
+	rules.forEach(rule => {
+		const synonym = normalizeSynonym(rule.synonym);
+		if (!synonym) {
+			return;
+		}
+
+		let nodeIndex = 0;
+		for (const character of synonym) {
+			let nextIndex = getNode(nodeIndex).transitions.get(character);
+			if (nextIndex === undefined) {
+				nextIndex = nodes.length;
+				getNode(nodeIndex).transitions.set(character, nextIndex);
+				nodes.push({
+					transitions: new Map(),
+					failure: 0,
+					outputLink: 0,
+					rules: [],
+				});
+			}
+			nodeIndex = nextIndex;
+		}
+		getNode(nodeIndex).rules.push({ synonym, term: rule.term });
+	});
+
+	const queue: number[] = [];
+	getNode(0).transitions.forEach(childIndex => queue.push(childIndex));
+	for (let head = 0; head < queue.length; head++) {
+		const nodeIndex = queue[head];
+		if (nodeIndex === undefined) {
+			continue;
+		}
+		const node = getNode(nodeIndex);
+		node.transitions.forEach((childIndex, character) => {
+			queue.push(childIndex);
+			let fallback = node.failure;
+			while (fallback !== 0 && !getNode(fallback).transitions.has(character)) {
+				fallback = getNode(fallback).failure;
+			}
+			const childNode = getNode(childIndex);
+			childNode.failure = getNode(fallback).transitions.get(character) ?? 0;
+			const failureNode = getNode(childNode.failure);
+			childNode.outputLink = failureNode.rules.length > 0
+				? childNode.failure
+				: failureNode.outputLink;
+		});
+	}
+
+	return (word: string): SynonymMatch => {
+		const normalizedWord = word.toLowerCase();
+		let nodeIndex = 0;
+		let term: string | undefined;
+		let exactMatch = false;
+		let conflict = false;
+
+		for (const character of normalizedWord) {
+			while (nodeIndex !== 0 && !getNode(nodeIndex).transitions.has(character)) {
+				nodeIndex = getNode(nodeIndex).failure;
+			}
+			nodeIndex = getNode(nodeIndex).transitions.get(character) ?? 0;
+
+			let outputIndex = getNode(nodeIndex).rules.length > 0
+				? nodeIndex
+				: getNode(nodeIndex).outputLink;
+			while (outputIndex !== 0) {
+				for (const rule of getNode(outputIndex).rules) {
+					if (term !== undefined && term !== rule.term) {
+						conflict = true;
+						return { term, exactMatch, conflict };
+					}
+					term = rule.term;
+					if (rule.synonym === normalizedWord) {
+						exactMatch = true;
+					}
+				}
+				outputIndex = getNode(outputIndex).outputLink;
+			}
+		}
+
+		return { term, exactMatch, conflict };
+	};
+}
+
+/**
  * Reads all Markdown files and collects candidate larger words for refactoring.
  *
  * Exact synonym tokens are not returned as larger-word candidates; those are
@@ -126,10 +257,7 @@ export async function scanRefactorCandidates(
 	rules: SynonymReplacementRule[],
 	onProgress: (completed: number, total: number) => void,
 ): Promise<RefactorScan> {
-	const normalizedRules = rules.map(rule => ({
-		synonym: normalizeSynonym(rule.synonym),
-		term: rule.term,
-	}));
+	const matchSynonyms = createSynonymMatcher(rules);
 	const files: RefactorScan['files'] = [];
 	const largerWords = new Map<string, { word: string; term: string }>();
 	const markdownFiles = app.vault.getMarkdownFiles();
@@ -143,23 +271,16 @@ export async function scanRefactorCandidates(
 		for (const match of content.matchAll(/[\p{L}\p{N}_]+/gu)) {
 			const word = match[0];
 			const normalizedWord = word.toLowerCase();
-			const matchingRules = normalizedRules.filter(rule =>
-				rule.synonym && normalizedWord.includes(rule.synonym),
-			);
-			const terms = new Set(matchingRules.map(rule => rule.term));
-
-			if (terms.size > 1) {
+			const matchResult = matchSynonyms(word);
+			if (matchResult.conflict) {
 				throw new Error(`The word "${word}" matches synonyms assigned to different terms.`);
 			}
 			// Exact matches are safe to replace automatically, so only queue substrings.
-			if (terms.size === 0 || matchingRules.some(rule => normalizedWord === rule.synonym)) {
+			if (matchResult.term === undefined || matchResult.exactMatch) {
 				continue;
 			}
 
-			const term = matchingRules[0]?.term;
-			if (term === undefined) {
-				continue;
-			}
+			const term = matchResult.term;
 			const existing = largerWords.get(normalizedWord);
 			if (existing && existing.term !== term) {
 				throw new Error(`The word "${word}" matches synonyms assigned to different terms.`);
@@ -192,30 +313,34 @@ export function replaceSynonymWords(
 	rules: SynonymReplacementRule[],
 	approvedWords: Set<string>,
 ): string {
-	const normalizedRules = rules.map(rule => ({
-		synonym: normalizeSynonym(rule.synonym),
-		term: rule.term,
-	}));
+	return createSynonymReplacer(rules)(content, approvedWords);
+}
 
-	// Match the same token boundaries used when gathering refactor candidates.
-	return content.replace(/[\p{L}\p{N}_]+/gu, word => {
+/**
+ * Prepares a reusable refactor function for a stable set of synonym rules.
+ * The compiled matcher can be shared across all files in one refactor.
+ *
+ * @param rules Synonym-to-term mappings to compile.
+ * @returns A function that transforms content using a set of approved larger words.
+ * @throws When a token matches synonyms assigned to different terms.
+ */
+export function createSynonymReplacer(
+	rules: SynonymReplacementRule[],
+): (content: string, approvedWords: Set<string>) => string {
+	const matchSynonyms = createSynonymMatcher(rules);
+
+	return (content, approvedWords) => content.replace(/[\p{L}\p{N}_]+/gu, word => {
 		const normalizedWord = word.toLowerCase();
-		const matchingRules = normalizedRules.filter(rule =>
-			rule.synonym && normalizedWord.includes(rule.synonym),
-		);
-		const terms = new Set(matchingRules.map(rule => rule.term));
-
-		if (terms.size > 1) {
+		const match = matchSynonyms(word);
+		if (match.conflict) {
 			throw new Error(`The word "${word}" matches synonyms assigned to different terms.`);
 		}
-		if (terms.size === 0) {
+		if (match.term === undefined) {
 			return word;
 		}
 
-		const exactMatch = matchingRules.some(rule => normalizedWord === rule.synonym);
-		const term = matchingRules[0]?.term;
-		return term !== undefined && (exactMatch || approvedWords.has(normalizedWord))
-			? term
+		return match.exactMatch || approvedWords.has(normalizedWord)
+			? match.term
 			: word;
 	});
 }
@@ -239,6 +364,8 @@ export async function createUsageCounter(
 	// Keep hashtag counts separate from prose counts to avoid counting tags twice.
 	const synonymUsages = new Map<string, number>();
 	const regularText: string[] = [];
+	const characterDocuments = new Map<string, number[]>();
+	const usageCache = new Map<string, number>();
 	const markdownFiles = app.vault.getMarkdownFiles();
 
 	for (const [i, file] of markdownFiles.entries()) {
@@ -282,15 +409,55 @@ export async function createUsageCounter(
 			offset = rangeEnd;
 		});
 		prose += content.slice(offset);
-		regularText.push(prose.toLowerCase());
+		const documentIndex = regularText.length;
+		const normalizedProse = prose.toLowerCase();
+		regularText.push(normalizedProse);
+		new Set(normalizedProse).forEach(character => {
+			const documents = characterDocuments.get(character);
+			if (documents) {
+				documents.push(documentIndex);
+			} else {
+				characterDocuments.set(character, [documentIndex]);
+			}
+		});
 	}
 
-	// Terms and synonyms use the same tag-plus-prose matching rules.
+	// Candidate documents and cached totals avoid rescanning the whole vault
+	// for every keystroke when users edit terms and synonyms.
 	return (value: string): number => {
 		const normalizedValue = normalizeSynonym(value);
-		return (synonymUsages.get(normalizedValue) ?? 0) + regularText.reduce(
-			(total, text) => total + countOccurrences(text, normalizedValue),
+		const cachedCount = usageCache.get(normalizedValue);
+		if (cachedCount !== undefined) {
+			return cachedCount;
+		}
+		if (!normalizedValue) {
+			return 0;
+		}
+
+		let candidateDocuments: number[] | undefined;
+		for (const character of normalizedValue) {
+			const documents = characterDocuments.get(character);
+			if (!documents) {
+				candidateDocuments = [];
+				break;
+			}
+			if (!candidateDocuments || documents.length < candidateDocuments.length) {
+				candidateDocuments = documents;
+			}
+		}
+
+		const proseCount = (candidateDocuments ?? []).reduce(
+			(total, index) => {
+				const text = regularText[index];
+				if (text === undefined) {
+					throw new Error('Invalid Markdown usage index.');
+				}
+				return total + countOccurrences(text, normalizedValue);
+			},
 			0,
 		);
+		const count = (synonymUsages.get(normalizedValue) ?? 0) + proseCount;
+		usageCache.set(normalizedValue, count);
+		return count;
 	};
 }

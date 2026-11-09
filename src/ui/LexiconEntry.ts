@@ -2,25 +2,44 @@ import { countTotalUsages } from '../utils/linguistics';
 import type { UsageCounter } from '../utils/linguistics';
 
 export interface LexiconEntryInputs {
+	/** Details element containing this entry's editable fields. */
 	container: HTMLDetailsElement;
+	/** Input holding the canonical vocabulary term. */
 	term: HTMLInputElement;
+	/** Input holding the term's definition. */
 	definition: HTMLInputElement;
+	/** Inputs holding the entry's editable synonyms. */
 	synonyms: HTMLInputElement[];
 }
 
 interface CreateLexiconEntryOptions {
+	/** Parent element that receives the new details row. */
 	container: HTMLElement;
+	/** Initial term, definition, and serialized synonym values. */
 	initialValues?: string[];
+	/** Whether the row is expanded when rendered. */
 	expanded?: boolean;
+	/** Parsed synonyms, when available instead of the serialized field. */
 	initialSynonyms?: string[];
+	/** Stable index used to generate unique input and error IDs. */
 	entryIndex: number;
+	/** Counter used to populate term and synonym usage indicators. */
 	getUsageCount: UsageCounter;
+	/** Shared field-to-error mapping used by save-time validation. */
 	saveErrors: Map<HTMLInputElement, HTMLSpanElement>;
+	/** Invoked when the row's Refactor button is selected. */
 	onRefactor: (entry: LexiconEntryInputs, button: HTMLButtonElement) => void;
 }
 
 /**
- * Renders one collapsible vocabulary item and returns its editable inputs.
+ * Renders one collapsible vocabulary item, including synonym controls and
+ * usage counts, and returns the inputs used by saving and refactoring.
+ *
+ * Synonyms are stored as individual inputs in the UI. If only a serialized
+ * synonym string is provided, semicolons are used to split it into inputs.
+ *
+ * @param options Parent, initial data, and callbacks for the row.
+ * @returns References to the row's editable fields.
  */
 export function createLexiconEntry({
 	container,
