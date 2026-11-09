@@ -5,6 +5,8 @@ import {
 	Modal,
 	Notice,
 	Plugin,
+	TFile,
+	TFolder,
 } from 'obsidian';
 import {
 	DEFAULT_SETTINGS,
@@ -20,35 +22,6 @@ export default class MyPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (_evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			},
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (
-				editor: Editor,
-				_ctx: MarkdownView | MarkdownFileInfo,
-			) => {
-				editor.replaceSelection('Sample editor command');
-			},
-		});
 		// This adds a complex command that can check whether the current state of the app allows execution of the command
 		this.addCommand({
 			id: 'open-modal-complex',
@@ -69,6 +42,43 @@ export default class MyPlugin extends Plugin {
 				}
 				return false;
 			},
+		});
+
+		// Prints All Files in Vault
+		this.addCommand({
+			id: 'print-files',
+			name: "Iteratively Prints through all files in vault",
+			checkCallback: (checking: boolean) => {
+				const files = this.app.vault.getMarkdownFiles()
+
+				if (files.length < 1) {
+					return false;
+				}
+
+				files.forEach((file) => {
+					console.log(file.path);
+				});
+				return true;
+			}
+		});
+		
+		// Prints All Files in Vault
+		this.addCommand({
+			id: 'print-vocab',
+			name: "Print all Vocab Elements",
+			callback: async () => {
+				const vocab = this.app.vault.getAbstractFileByPath("vocab.md")
+
+				// if (vocab instanceof TFolder || vocab == null) {
+				// 	return false;
+				// }
+
+				if (vocab instanceof TFile) {
+					const content = await this.app.vault.read(vocab);
+					console.log(content)
+				}
+
+			}
 		});
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
