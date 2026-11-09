@@ -1,11 +1,6 @@
 import { App, TFile } from 'obsidian';
 
 /**
- * Counts case-insensitive term and synonym matches across the scanned vault.
- */
-export type UsageCounter = (value: string) => number;
-
-/**
  * Associates a synonym with the canonical term that should replace it.
  */
 export interface SynonymReplacementRule {
@@ -54,13 +49,6 @@ interface SynonymMatcherNode {
 
 /** Matches all configured synonyms contained in a candidate word. */
 type SynonymMatcher = (word: string) => SynonymMatch;
-
-/**
- * Adds the usage count for each value, including repeated values if present.
- */
-export function countTotalUsages(values: string[], getUsageCount: UsageCounter): number {
-	return values.reduce((total, value) => total + getUsageCount(value), 0);
-}
 
 /**
  * Normalizes values for matching: trims surrounding whitespace, removes leading
@@ -114,27 +102,6 @@ export function findCommonWordCandidates(
 	commonWords: Set<string>,
 ): CommonWordCandidate[] {
 	return candidates.filter(candidate => commonWords.has(normalizeSynonym(candidate.value)));
-}
-
-/**
- * Counts substring matches, including overlapping ones.
- *
- * @param text The text to search; callers provide normalized text.
- * @param query The normalized substring to count.
- * @returns The number of matches, or zero when the query is empty.
- */
-function countOccurrences(text: string, query: string): number {
-	if (!query) {
-		return 0;
-	}
-
-	let count = 0;
-	let offset = 0;
-	while ((offset = text.indexOf(query, offset)) !== -1) {
-		count++;
-		offset++;
-	}
-	return count;
 }
 
 /**
@@ -343,121 +310,4 @@ export function createSynonymReplacer(
 			? match.term
 			: word;
 	});
-}
-
-/**
- * Builds a reusable usage counter by scanning the vault's Markdown files.
- *
- * Hashtags are counted from Obsidian's parsed metadata, with each component
- * of a hierarchical tag counted separately. The source ranges occupied by
- * those hashtags are masked before the prose scan so each tag only counts once.
- *
- * @param app Obsidian app used to read Markdown files and their cached metadata.
- * @param onProgress Called once per file with the completed and total counts.
- * @returns A normalized, case-insensitive counter for any term or synonym.
- * @throws If a Markdown file cannot be read.
- */
-export async function createUsageCounter(
-	app: App,
-	onProgress: (completed: number, total: number) => void,
-): Promise<UsageCounter> {
-	// Keep hashtag counts separate from prose counts to avoid counting tags twice.
-	const synonymUsages = new Map<string, number>();
-	const regularText: string[] = [];
-	const characterDocuments = new Map<string, number[]>();
-	const usageCache = new Map<string, number>();
-	const markdownFiles = app.vault.getMarkdownFiles();
-
-	for (const [i, file] of markdownFiles.entries()) {
-		onProgress(i + 1, markdownFiles.length);
-		const content = await app.vault.read(file);
-		// Obsidian's cache identifies actual hashtags, including their source positions.
-		const markdownTags = app.metadataCache.getFileCache(file)?.tags ?? [];
-
-		markdownTags.forEach(({ tag: markdownTag }) => {
-			const normalizedSynonym = normalizeSynonym(markdownTag);
-			if (!normalizedSynonym) {
-				return;
-			}
-
-			// Count each part of a nested tag as well as the full tag.
-			const synonymNames = new Set([
-				normalizedSynonym,
-				...normalizedSynonym.split('/'),
-			]);
-			synonymNames.forEach(synonym => {
-				synonymUsages.set(synonym, (synonymUsages.get(synonym) ?? 0) + 1);
-			});
-		});
-
-		let prose = '';
-		let offset = 0;
-		// Sort ranges so we can mask them in order without changing later offsets.
-		const markdownTagRanges = markdownTags
-			.map(({ position }) => ({
-				start: position.start.offset,
-				end: position.end.offset,
-			}))
-			.sort((a, b) => a.start - b.start);
-		// Mask parsed hashtags so the prose scan won't count them twice.
-		markdownTagRanges.forEach(({ start, end }) => {
-			// Clamp metadata offsets in case the cached range exceeds current file text.
-			const rangeStart = Math.min(content.length, Math.max(offset, start));
-			const rangeEnd = Math.min(content.length, Math.max(rangeStart, end));
-			prose += content.slice(offset, rangeStart);
-			prose += ' '.repeat(rangeEnd - rangeStart);
-			offset = rangeEnd;
-		});
-		prose += content.slice(offset);
-		const documentIndex = regularText.length;
-		const normalizedProse = prose.toLowerCase();
-		regularText.push(normalizedProse);
-		new Set(normalizedProse).forEach(character => {
-			const documents = characterDocuments.get(character);
-			if (documents) {
-				documents.push(documentIndex);
-			} else {
-				characterDocuments.set(character, [documentIndex]);
-			}
-		});
-	}
-
-	// Candidate documents and cached totals avoid rescanning the whole vault
-	// for every keystroke when users edit terms and synonyms.
-	return (value: string): number => {
-		const normalizedValue = normalizeSynonym(value);
-		const cachedCount = usageCache.get(normalizedValue);
-		if (cachedCount !== undefined) {
-			return cachedCount;
-		}
-		if (!normalizedValue) {
-			return 0;
-		}
-
-		let candidateDocuments: number[] | undefined;
-		for (const character of normalizedValue) {
-			const documents = characterDocuments.get(character);
-			if (!documents) {
-				candidateDocuments = [];
-				break;
-			}
-			if (!candidateDocuments || documents.length < candidateDocuments.length) {
-				candidateDocuments = documents;
-			}
-		}
-
-		const proseCount = (candidateDocuments ?? []).reduce(
-			(total, index) => {
-				const text = regularText[index];
-				if (text === undefined) {
-					throw new Error('Invalid Markdown usage index.');
-				}
-				return total + countOccurrences(text, normalizedValue);
-			},
-			0,
-		);
-		const count = (synonymUsages.get(normalizedValue) ?? 0) + proseCount;
-		usageCache.set(normalizedValue, count);
-		return count;
-	};
 }
