@@ -3,11 +3,11 @@ name: Release
 on:
     push:
         branches:
-            - release
+            - main
 
 jobs:
     release:
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-slim
         permissions:
             contents: write
         steps:
