@@ -1,6 +1,7 @@
 import { ItemView, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
 import type { EventRef } from 'obsidian';
-import { loadCommonWords } from '../utils/linguistics';
+import { loadCommonWords, loadStopwords } from '../utils/linguistics';
+import { normalizeWordForGrouping } from '../utils/UsageIndex';
 import type { GroupingMode, UsageIndex } from '../utils/UsageIndex';
 
 export const WORD_FREQUENCY_VIEW_TYPE = 'obsidian-vocabulary-word-frequency';
@@ -37,6 +38,8 @@ export class WordFrequencyView extends ItemView {
 	private words: WordFrequency[] = [];
 	private sourceLabel = 'in the workspace';
 	private commonWords?: Set<string>;
+	private stopwords?: Set<string>;
+	private effectiveStopwords = new Set<string>();
 	private excludingCommonWords = false;
 	private hidingCommonWords = false;
 	private groupingMode: GroupingMode = 'none';
@@ -183,7 +186,12 @@ export class WordFrequencyView extends ItemView {
 			}
 		}));
 		this.vaultEventRefs.push(this.app.vault.on('modify', file => {
-			if (this.isMarkdownFile(file)) {
+			if (this.isMarkdownFile(file) || file.path === this.stopwordsResourcePath()) {
+				this.scheduleRefresh();
+			}
+		}));
+		this.vaultEventRefs.push(this.app.vault.on('create', file => {
+			if (file.path === this.stopwordsResourcePath()) {
 				this.scheduleRefresh();
 			}
 		}));
@@ -359,6 +367,10 @@ export class WordFrequencyView extends ItemView {
 		}
 		this.setStatusLoading('Updating word counts...');
 		try {
+			await this.reloadStopwords();
+			if (scanId !== this.scanId) {
+				return;
+			}
 			const frequencies = await this.usageIndex.getWordFrequencies(
 				this.groupingMode,
 				activeFileOnly && this.isMarkdownFile(activeFile) ? activeFile : undefined,
@@ -395,6 +407,19 @@ export class WordFrequencyView extends ItemView {
 			this.statusEl?.setText('Unable to update word frequency. Try refreshing.');
 			new Notice('Could not update word frequency.');
 		}
+	}
+
+	private stopwordsResourcePath(): string {
+		return `${this.pluginDirectory ?? ''}/resources/stopwords.txt`;
+	}
+
+	private async reloadStopwords(): Promise<void> {
+		this.stopwords = await loadStopwords(this.app, this.pluginDirectory);
+		this.effectiveStopwords = new Set(
+			[...this.stopwords].map(stopword =>
+				normalizeWordForGrouping(stopword, this.groupingMode),
+			),
+		);
 	}
 
 	private showSkeleton(): void {
@@ -540,11 +565,13 @@ export class WordFrequencyView extends ItemView {
 			if (!entry) {
 				continue;
 			}
+			const isStopword = this.isStopword(entry.word);
 			const isCommon = shouldHideCommon && this.commonWords?.has(entry.word);
-			if (!this.excludingCommonWords || !isCommon) {
+			if (!isStopword && (!this.excludingCommonWords || !isCommon)) {
 				denominatorWords.push(entry);
 			}
 			if (
+				!isStopword &&
 				(!shouldHideCommon || !isCommon) &&
 				(!query || entry.word.includes(query))
 			) {
@@ -593,7 +620,9 @@ export class WordFrequencyView extends ItemView {
 				this.wordRows.set(entry.word, row);
 			}
 			const isCommon = shouldHideCommon && this.commonWords?.has(entry.word);
-			const isVisible = (!shouldHideCommon || !isCommon) &&
+			const isStopword = this.isStopword(entry.word);
+			const isVisible = !isStopword &&
+				(!shouldHideCommon || !isCommon) &&
 				(!query || entry.word.includes(query));
 			row.item.hidden = !isVisible;
 			const currentRow = this.listEl.children.item(rowPosition);
@@ -651,6 +680,10 @@ export class WordFrequencyView extends ItemView {
 		const barFill = bar.createSpan({ cls: 'word-frequency-bar-fill' });
 		const count = item.createSpan({ text: '0', cls: 'word-frequency-count' });
 		return { item, bar, barFill, count };
+	}
+
+	private isStopword(word: string): boolean {
+		return this.stopwords?.has(word) === true || this.effectiveStopwords.has(word);
 	}
 
 	private showLargeFileAlert(): void {

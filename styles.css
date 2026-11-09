@@ -277,6 +277,10 @@ If your plugin does not need CSS, delete this file.
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
+.word-frequency-list li[hidden] {
+	display: none;
+}
+
 .word-frequency-skeleton {
 	gap: 1rem;
 }

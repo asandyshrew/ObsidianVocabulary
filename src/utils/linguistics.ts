@@ -89,6 +89,26 @@ export async function loadCommonWords(app: App, pluginDirectory?: string): Promi
 	);
 }
 
+export async function loadStopwords(app: App, pluginDirectory?: string): Promise<Set<string>> {
+	if (!pluginDirectory) {
+		throw new Error('Cannot locate the plugin folder to load resources/stopwords.txt.');
+	}
+
+	const resourcePath = `${pluginDirectory}/resources/stopwords.txt`;
+	let content: string;
+	try {
+		content = await app.vault.adapter.read(resourcePath);
+	} catch {
+		throw new Error(`Could not load "${resourcePath}". Word frequency was cancelled.`);
+	}
+
+	return new Set(
+		content.split(/\r?\n/)
+			.map(word => word.trim().toLowerCase())
+			.filter(Boolean),
+	);
+}
+
 /**
  * Returns each non-empty term or synonym whose complete value is a common word.
  * Matching ignores case and surrounding whitespace but does not match substrings.

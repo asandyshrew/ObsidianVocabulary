@@ -41,6 +41,17 @@ function lemmatizeWord(word: string): string {
 	return candidates.find(candidate => candidate !== word) ?? word;
 }
 
+export function normalizeWordForGrouping(word: string, mode: GroupingMode): string {
+	const normalizedWord = word.toLowerCase();
+	if (mode === 'stem') {
+		return stemmer(normalizedWord);
+	}
+	if (mode === 'lemma') {
+		return lemmatizeWord(normalizedWord);
+	}
+	return normalizedWord;
+}
+
 /**
  * Shares one incremental Markdown scan between modal usages and word-frequency
  * counts. Each changed file is read and tokenized once; derived counts remain
@@ -259,8 +270,8 @@ export class UsageIndex {
 		while (token) {
 			const word = token[0].toLowerCase();
 			increment(wordCounts.none, word);
-			increment(wordCounts.stem, stemmer(word));
-			increment(wordCounts.lemma, lemmatizeWord(word));
+			increment(wordCounts.stem, normalizeWordForGrouping(word, 'stem'));
+			increment(wordCounts.lemma, normalizeWordForGrouping(word, 'lemma'));
 			processedTokens++;
 			if (processedTokens % YIELD_INTERVAL === 0) {
 				await yieldToUI();
