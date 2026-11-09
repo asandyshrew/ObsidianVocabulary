@@ -41,6 +41,7 @@ export class LexiconModal extends Modal {
 	private usageIndex: UsageIndex;
 	private usageRefreshTimer?: number;
 	private vaultEventRefs: EventRef[] = [];
+	private metadataEventRef?: EventRef;
 
 	/**
 	 * @param app Obsidian app instance used by the modal.
@@ -156,6 +157,11 @@ export class LexiconModal extends Modal {
 				scheduleUsageCountRefresh();
 			}
 		}));
+		this.metadataEventRef = this.app.metadataCache.on('changed', file => {
+			if (isMarkdownFile(file)) {
+				scheduleUsageCountRefresh();
+			}
+		});
 
 		const addEntry = (
 			initialValues: string[] = ['', '', ''],
@@ -488,6 +494,10 @@ export class LexiconModal extends Modal {
 		}
 		this.vaultEventRefs.forEach(eventRef => this.app.vault.offref(eventRef));
 		this.vaultEventRefs = [];
+		if (this.metadataEventRef) {
+			this.app.metadataCache.offref(this.metadataEventRef);
+			this.metadataEventRef = undefined;
+		}
 		this.contentEl.empty();
 	}
 }

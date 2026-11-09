@@ -1,4 +1,4 @@
-import { App, TFile } from 'obsidian';
+import { App, getAllTags, TFile } from 'obsidian';
 import { stemmer } from 'stemmer';
 import lemmatizer from 'wink-lemmatizer';
 import { normalizeSynonym } from './linguistics';
@@ -162,7 +162,8 @@ export class UsageIndex {
 			[...this.files.keys()].some(path => !paths.has(path)) ||
 			markdownFiles.some(file => {
 				const cached = this.files.get(file.path);
-				return file.stat.size > MAX_FILE_SIZE_BYTES
+				const shouldSkip = file.stat.size > MAX_FILE_SIZE_BYTES && !this.hasForceScanTag(file);
+				return shouldSkip
 					? Boolean(cached) || !this.skippedFiles.has(file.path)
 					: !cached || cached.mtime !== file.stat.mtime || cached.size !== file.stat.size;
 			});
@@ -182,7 +183,7 @@ export class UsageIndex {
 		for (const [index, file] of markdownFiles.entries()) {
 			const { mtime, size } = file.stat;
 			const cached = this.files.get(file.path);
-			if (size > MAX_FILE_SIZE_BYTES) {
+			if (size > MAX_FILE_SIZE_BYTES && !this.hasForceScanTag(file)) {
 				this.files.delete(file.path);
 				this.skippedFiles.add(file.path);
 			} else if (cached?.mtime !== mtime || cached.size !== size) {
@@ -199,6 +200,13 @@ export class UsageIndex {
 		}
 
 		this.hasScanned = true;
+	}
+
+	private hasForceScanTag(file: TFile): boolean {
+		const cache = this.app.metadataCache.getFileCache(file);
+		return (cache ? getAllTags(cache) ?? [] : []).some(tag =>
+			tag.replace(/^#/, '').toLowerCase() === 'force-scan',
+		);
 	}
 
 	private async indexFile(

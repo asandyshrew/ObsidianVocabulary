@@ -41,6 +41,7 @@ export class WordFrequencyView extends ItemView {
 	private largeFileAlert?: HTMLElement;
 	private largeFileAlertTimer?: number;
 	private vaultEventRefs: EventRef[] = [];
+	private metadataEventRef?: EventRef;
 	private workspaceEventRef?: EventRef;
 	private outsideClickHandler?: (event: MouseEvent) => void;
 
@@ -175,6 +176,11 @@ export class WordFrequencyView extends ItemView {
 				this.scheduleRefresh();
 			}
 		}));
+		this.metadataEventRef = this.app.metadataCache.on('changed', file => {
+			if (this.isMarkdownFile(file)) {
+				this.scheduleRefresh();
+			}
+		});
 		this.workspaceEventRef = this.app.workspace.on('active-leaf-change', () => {
 			if (this.singleFileCheckbox?.checked) {
 				this.scheduleRefresh();
@@ -211,6 +217,10 @@ export class WordFrequencyView extends ItemView {
 		this.largeFileAlert = undefined;
 		this.vaultEventRefs.forEach(eventRef => this.app.vault.offref(eventRef));
 		this.vaultEventRefs = [];
+		if (this.metadataEventRef) {
+			this.app.metadataCache.offref(this.metadataEventRef);
+			this.metadataEventRef = undefined;
+		}
 		if (this.workspaceEventRef) {
 			this.app.workspace.offref(this.workspaceEventRef);
 			this.workspaceEventRef = undefined;
