@@ -1,31 +1,31 @@
-# Obsidian Sample Plugin
+# Obsidian Vocabulary
 
-This is a sample plugin for Obsidian (https://obsidian.md).
+Obsidian plugin for managing vocabulary terms, definitions, and synonyms in a `vocabulary.lexicon` file.
 
-This project uses TypeScript to provide type checking and documentation.
-The repo depends on the latest plugin API (obsidian.d.ts) in TypeScript Definition format, which contains TSDoc comments describing what it does.
+## Features
 
-This sample plugin demonstrates some of the basic functionality the plugin API can do.
+- Edit vocabulary entries and synonyms in a collapsible modal.
+- Count terms and synonyms in Markdown text and tags.
+- Refactor synonyms to their terms across Markdown files, with confirmation prompts.
+- Remember approved common-word confirmations in plugin settings.
 
-- Adds a ribbon icon, which shows a Notice when clicked.
-- Adds a command "Open modal (simple)" which opens a Modal.
-- Adds a plugin setting tab to the settings page.
-- Registers a global click event and outputs a Notice on click.
-- Registers a global interval which logs 'setInterval' to the console.
+## Source layout
 
-## First time developing plugins?
+```text
+src/
+  commands/  Command and ribbon registration
+  ui/        Vocabulary entry and modal components
+  utils/     Vocabulary counting and text helpers
+  main.ts    Plugin lifecycle and settings initialization
+  settings.ts
+```
 
-Quick starting guide for new plugin devs:
+## Development
 
-- Check if [someone already developed a plugin for what you want](https://obsidian.md/plugins)! There might be an existing plugin similar enough that you can partner up with.
-- Make a copy of this repo as a template with the "Use this template" button (login to GitHub if you don't see it).
-- Clone your repo to a local development folder. For convenience, you can place this folder in your `.obsidian/plugins/your-plugin-name` folder.
-- Install NodeJS, then run `npm i` in the command line under your repo folder.
-- Run `npm run dev` to compile your plugin from `src/main.ts` to `main.js`.
-- Make changes to `src/main.ts` (or create new `.ts` files). Those changes should be automatically compiled into `main.js`.
-- Reload Obsidian to load the new version of your plugin.
-- Enable plugin in settings window.
-- For updates to the Obsidian API run `npm update` in the command line under your repo folder.
+- Run `npm install` to install dependencies.
+- Run `npm run dev` to compile in watch mode.
+- Run `npm run build` for a production build and type check.
+- Run `npm run lint` to lint the project.
 
 ## Releasing new releases
 

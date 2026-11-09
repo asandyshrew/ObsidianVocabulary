@@ -1,7 +1,7 @@
 import { App, TFile } from 'obsidian';
 
 /**
- * Counts case-insensitive matches for a term or synonym in the scanned vault.
+ * Counts case-insensitive term and synonym matches across the scanned vault.
  */
 export type UsageCounter = (value: string) => number;
 

@@ -1,93 +1,22 @@
 import { App, Modal, Notice } from 'obsidian';
 import {
-	countTotalUsages,
 	createUsageCounter,
 	findCommonWordCandidates,
 	loadCommonWords,
 	normalizeSynonym,
 	replaceSynonymWords,
 	scanRefactorCandidates,
-} from './linguistics';
-import type { SynonymReplacementRule } from './linguistics';
+} from '../utils/linguistics';
+import type { SynonymReplacementRule } from '../utils/linguistics';
+import { confirmAction } from './ConfirmationModal';
+import { createLexiconEntry } from './LexiconEntry';
+import type { LexiconEntryInputs } from './LexiconEntry';
 
-/**
- * The editable controls belonging to one collapsible lexicon entry.
- * The rendered UI is kept separate so saving and refactoring use these inputs.
- */
-interface LexiconEntryInputs {
-	container: HTMLDetailsElement;
-	term: HTMLInputElement;
-	definition: HTMLInputElement;
-	synonyms: HTMLInputElement[];
-}
-
-/**
- * Small confirmation dialog used for per-word and final refactor approval.
- * Closing the dialog without choosing an action is treated as cancellation.
- */
-class ConfirmationModal extends Modal {
-	private settled = false;
-
-	constructor(
-		app: App,
-		private title: string,
-		private message: string,
-		private confirmLabel: string,
-		private onDecision: (confirmed: boolean) => void,
-	) {
-		super(app);
-	}
-
-	/** Renders the question and its explicit cancel/confirm actions. */
-	onOpen() {
-		this.contentEl.createEl('h2', { text: this.title });
-		this.contentEl.createEl('p', { text: this.message });
-
-		const actions = this.contentEl.createDiv({ cls: 'modal-actions' });
-		actions.createEl('button', { text: 'Cancel' }).addEventListener('click', () => {
-			this.finish(false);
-		});
-		actions.createEl('button', {
-			text: this.confirmLabel,
-			cls: 'mod-cta',
-		}).addEventListener('click', () => {
-			this.finish(true);
-		});
-	}
-
-	/** Resolve an unanswered dialog as cancelled and release its contents. */
-	onClose() {
-		if (!this.settled) {
-			this.settled = true;
-			this.onDecision(false);
-		}
-		this.contentEl.empty();
-	}
-
-	/** Resolve at most once, even if a button click is followed by modal close. */
-	private finish(confirmed: boolean) {
-		if (this.settled) {
-			return;
-		}
-		this.settled = true;
-		this.onDecision(confirmed);
-		this.close();
-	}
-}
-
-/**
- * Opens a confirmation dialog and resolves with the user's decision.
- * Dismissing the dialog is equivalent to choosing Cancel.
- */
-function confirmAction(
-	app: App,
-	title: string,
-	message: string,
-	confirmLabel: string,
-): Promise<boolean> {
-	return new Promise(resolve => {
-		new ConfirmationModal(app, title, message, confirmLabel, resolve).open();
-	});
+export interface LexiconModalOptions {
+	fileName?: string;
+	pluginDirectory?: string;
+	confirmedCommonTerms: string[];
+	persistCommonTermConfirmations: () => Promise<void>;
 }
 
 /**
@@ -99,20 +28,23 @@ function confirmAction(
  */
 export class LexiconModal extends Modal {
 	private fileName: string;
+	private pluginDirectory?: string;
+	private confirmedCommonTerms: string[];
+	private persistCommonTermConfirmations: () => Promise<void>;
 
 	/**
 	 * @param app Obsidian app instance used by the modal.
-	 * @param fileName Vault-relative path of the lexicon data file.
+	 * @param options File location and persistence for common-word confirmations.
 	 */
 	constructor(
 		app: App,
-		fileName: string = 'vocabulary.lexicon',
-		private pluginDirectory?: string,
-		private confirmedCommonTerms: string[] = [],
-		private persistCommonTermConfirmations: () => Promise<void> = async () => {},
+		options: LexiconModalOptions,
 	) {
 		super(app);
-		this.fileName = fileName;
+		this.fileName = options.fileName ?? 'vocabulary.lexicon';
+		this.pluginDirectory = options.pluginDirectory;
+		this.confirmedCommonTerms = options.confirmedCommonTerms;
+		this.persistCommonTermConfirmations = options.persistCommonTermConfirmations;
 	}
 
 	/** Load lexicon data and usage counts, then build the interactive editor. */
@@ -172,181 +104,23 @@ export class LexiconModal extends Modal {
 			});
 		};
 
-		// Build one collapsible entry; existing entries start closed, new ones open.
-		/**
-		 * Creates one entry and wires its editable fields, live counters, and controls.
-		 *
-		 * @param initialValues Term, definition, and serialized synonyms.
-		 * @param expanded Whether the details element starts open.
-		 * @param initialSynonyms Optional already-parsed synonyms.
-		 */
 		const addEntry = (
 			initialValues: string[] = ['', '', ''],
 			expanded = true,
 			initialSynonyms?: string[],
 		) => {
-			const entry = entriesEl.createEl('details', { cls: 'lexicon-entry' });
-			entry.open = expanded;
-
-			const summary = entry.createEl('summary', {
-				cls: 'lexicon-entry-summary',
-			});
-			const summaryTerm = summary.createSpan({
-				text: initialValues[0] || 'New vocabulary item',
-				cls: 'lexicon-entry-title',
-			});
-			const summaryCounts = summary.createSpan({
-				cls: 'lexicon-entry-usage-group',
-			});
-			// The collapsed row shows the term count, then the combined row total.
-			const summaryUsageCount = summaryCounts.createSpan({ cls: 'lexicon-entry-usage' });
-			summaryCounts.createSpan({ text: '|', cls: 'lexicon-entry-usage-separator' });
-			const summaryRowUsageCount = summaryCounts.createSpan({ cls: 'lexicon-entry-usage' });
-			const fieldsEl = entry.createDiv({ cls: 'lexicon-entry-fields' });
-			const entryIndex = entries.length;
-			const createField = (label: string, value: string, index: number) => {
-				const field = fieldsEl.createDiv({ cls: 'lexicon-entry-field' });
-				const inputId = `lexicon-field-${entryIndex}-${index}`;
-				// Linking labels to unique inputs also makes each field easier to access.
-				field.createEl('label', { text: label, attr: { for: inputId } });
-				const input = field.createEl('input', {
-					type: 'text',
-					value,
-					placeholder: label,
-					attr: { id: inputId },
-				});
-				return { field, input };
-			};
-
-			const termField = createField('Term', initialValues[0] || '', 0);
-			const rowInputs: LexiconEntryInputs = {
-				container: entry,
-				term: termField.input,
-				definition: createField('Definition', initialValues[1] || '', 1).input,
-				synonyms: [],
-			};
-			entries.push(rowInputs);
-
-			const updateSummaryRowUsageCount = () => {
-				// Recalculate from current inputs so edits and removals are reflected immediately.
-				const count = countTotalUsages(
-					[rowInputs.term.value, ...rowInputs.synonyms.map(synonym => synonym.value)],
-					getUsageCount,
-				);
-				summaryRowUsageCount.textContent = `${count}`;
-				summaryRowUsageCount.setAttribute('aria-label', `${count} total usages for this row`);
-				summaryRowUsageCount.title = `${count} total usages for this row`;
-			};
-			const termUsageCount = termField.field.createSpan({ cls: 'lexicon-synonym-usage' });
-			const updateTermUsageCount = () => {
-				const count = getUsageCount(rowInputs.term.value);
-				termUsageCount.textContent = `${count} usages`;
-				termUsageCount.setAttribute('aria-label', `${count} usages in Markdown files`);
-				termUsageCount.title = `${count} usages in Markdown files`;
-				summaryUsageCount.textContent = `${count}`;
-				summaryUsageCount.setAttribute('aria-label', `${count} usages in Markdown files`);
-				summaryUsageCount.title = `${count} usages in Markdown files`;
-				updateSummaryRowUsageCount();
-			};
-			rowInputs.term.addEventListener('input', updateTermUsageCount);
-			updateTermUsageCount();
-
-			rowInputs.term.addEventListener('input', () => {
-				summaryTerm.textContent = rowInputs.term.value || 'New vocabulary item';
-			});
-
-			const synonymField = fieldsEl.createDiv({ cls: 'lexicon-entry-field' });
-			synonymField.createEl('label', { text: 'Synonyms' });
-			const synonymList = synonymField.createDiv({ cls: 'lexicon-synonym-list' });
-
-			// Each synonym owns its counter and controls, while the entry tracks its input.
-			/**
-			 * Adds a synonym input and keeps the entry's total synchronized with it.
-			 * Removing a synonym also removes its input from the values used on save.
-			 */
-			const addSynonym = (value = '') => {
-				const synonymItem = synonymList.createDiv({ cls: 'lexicon-synonym-item' });
-				const inputIndex = rowInputs.synonyms.length;
-				const errorId = `lexicon-synonym-error-${entryIndex}-${inputIndex}`;
-				const fieldError = synonymItem.createSpan({
-					cls: 'lexicon-save-error',
-					attr: { id: errorId, role: 'alert' },
-				});
-				fieldError.hide();
-				const synonymRow = synonymItem.createDiv({ cls: 'lexicon-synonym-row' });
-				const input = synonymRow.createEl('input', {
-					type: 'text',
-					value,
-					placeholder: 'Synonym',
-					attr: { 'aria-label': 'Synonym' },
-				});
-				input.setAttribute('aria-describedby', errorId);
-				saveErrors.set(input, fieldError);
-				const usageCount = synonymRow.createSpan({
-					cls: 'lexicon-synonym-usage',
-					attr: { 'aria-live': 'polite' },
-				});
-				const updateUsageCount = () => {
-					const count = getUsageCount(input.value);
-					usageCount.textContent = String(count);
-					usageCount.setAttribute('aria-label', `${count} synonym usages in Markdown files`);
-					usageCount.title = `${count} synonym usages in Markdown files`;
-					updateSummaryRowUsageCount();
-				};
-				const swapButton = synonymRow.createEl('button', {
-					text: 'Swap with term',
-					attr: { type: 'button', 'aria-label': 'Swap synonym with term' },
-				});
-				swapButton.addEventListener('click', () => {
-					// Dispatch input events so both counters and the collapsed title refresh.
-					const term = rowInputs.term.value;
-					rowInputs.term.value = input.value;
-					input.value = term;
-					rowInputs.term.dispatchEvent(new Event('input'));
-					input.dispatchEvent(new Event('input'));
-				});
-				const removeButton = synonymRow.createEl('button', {
-					text: 'Remove',
-					attr: { type: 'button', 'aria-label': 'Remove synonym' },
-				});
-				removeButton.addEventListener('click', () => {
-					synonymItem.remove();
-					fieldError.remove();
-					saveErrors.delete(input);
-					// Remove the detached input from the data model as well as the UI.
-					const inputIndex = rowInputs.synonyms.indexOf(input);
-					if (inputIndex !== -1) {
-						rowInputs.synonyms.splice(inputIndex, 1);
-					}
-					updateSummaryRowUsageCount();
-				});
-				rowInputs.synonyms.push(input);
-				input.addEventListener('input', updateUsageCount);
-				updateUsageCount();
-			};
-
-			// The file stores synonyms in one field separated by semicolons.
-			const synonyms = initialSynonyms ?? (
-				initialValues[2]
-					? initialValues[2].split(';').map(synonym => synonym.trim()).filter(Boolean)
-					: ['']
-			);
-			synonyms.forEach(synonym => addSynonym(synonym));
-
-			const synonymActions = synonymField.createDiv({ cls: 'lexicon-synonym-actions' });
-			const addSynonymButton = synonymActions.createEl('button', {
-				text: 'Add synonym',
-				attr: { type: 'button' },
-			});
-			addSynonymButton.addEventListener('click', () => addSynonym());
-
-			const refactorEntryButton = synonymActions.createEl('button', {
-				text: 'Refactor',
-				attr: { type: 'button', 'aria-label': `Refactor ${rowInputs.term.value || 'this term'}` },
-			});
-			refactorEntryButton.addEventListener('click', () => {
-				void refactorEntries([rowInputs], refactorEntryButton);
-			});
+			entries.push(createLexiconEntry({
+				container: entriesEl,
+				initialValues,
+				expanded,
+				initialSynonyms,
+				entryIndex: entries.length,
+				getUsageCount,
+				saveErrors,
+				onRefactor: (entry, button) => {
+					void refactorEntries([entry], button);
+				},
+			}));
 		};
 
 		if (rawContent.trim().length > 0) {
