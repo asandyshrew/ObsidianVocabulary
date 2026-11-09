@@ -6,3 +6,77 @@ available in the app when your plugin is enabled.
 If your plugin does not need CSS, delete this file.
 
 */
+
+.lexicon-entries {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+	max-height: 60vh;
+	overflow-y: auto;
+}
+
+.lexicon-entry {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+}
+
+.lexicon-entry-summary {
+	cursor: pointer;
+	padding: 0.75rem;
+	font-weight: var(--font-semibold);
+}
+
+.lexicon-entry-fields {
+	display: grid;
+	gap: 0.75rem;
+	padding: 0 0.75rem 0.75rem;
+}
+
+.lexicon-entry-field {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+}
+
+.lexicon-entry-field label {
+	color: var(--text-muted);
+	font-size: var(--font-smaller);
+}
+
+.lexicon-entry-field input {
+	width: 100%;
+}
+
+.lexicon-tag-list {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+}
+
+.lexicon-tag-row {
+	display: flex;
+	gap: 0.5rem;
+}
+
+.lexicon-tag-row input {
+	flex: 1;
+}
+
+.lexicon-tag-row button[aria-label="Remove tag"] {
+	color: var(--text-error);
+}
+
+.lexicon-tag-row button[aria-label="Remove tag"]:hover {
+	color: var(--text-on-accent);
+	background-color: var(--background-modifier-error);
+}
+
+.lexicon-entry-field > button {
+	align-self: flex-start;
+}
+
+.modal-actions {
+	display: flex;
+	gap: 0.5rem;
+	margin-top: 1rem;
+}

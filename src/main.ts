@@ -14,7 +14,7 @@ import {
 	SampleSettingTab,
 } from './settings';
 
-import { TableModal } from './LexiconModal';
+import { LexiconModal } from './LexiconModal';
 
 // Remember to rename these classes and interfaces!
 
@@ -27,7 +27,7 @@ export default class MyPlugin extends Plugin {
 		this.addCommand({
 			id: 'open-lexicon-modal',
 			name: 'Open lexicon modal',
-			callback: () => new TableModal(this.app).open(),
+			callback: () => new LexiconModal(this.app).open(),
 		});
 
 		// Prints All Files in Vault
@@ -94,17 +94,5 @@ export default class MyPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
-	}
-}
-
-class SampleModal extends Modal {
-	onOpen() {
-		const { contentEl } = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const { contentEl } = this;
-		contentEl.empty();
 	}
 }

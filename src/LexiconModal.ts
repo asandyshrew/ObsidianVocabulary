@@ -1,118 +1,175 @@
 import { App, Modal, Notice } from 'obsidian';
 
-export class TableModal extends Modal {
-    private fileName: string;
+interface LexiconEntryInputs {
+	term: HTMLInputElement;
+	definition: HTMLInputElement;
+	tags: HTMLInputElement[];
+}
 
-    constructor(app: App, fileName: string = 'vocabulary.lexicon') {
-        super(app);
-        this.fileName = fileName;
-    }
+export class LexiconModal extends Modal {
+	private fileName: string;
 
-    async onOpen() {
-        const { contentEl } = this;
-        contentEl.empty();
+	constructor(app: App, fileName: string = 'vocabulary.lexicon') {
+		super(app);
+		this.fileName = fileName;
+	}
 
-        contentEl.createEl('h2', { text: 'Lexicon Loaded Data Table' });
+	async onOpen() {
+		const { contentEl } = this;
+		contentEl.empty();
 
-        const loadingIndicator = contentEl.createEl('p', { text: 'Loading vocabulary items from root...', cls: 'loading-text' });
-        let rawContent = '';
+		contentEl.createEl('h2', { text: 'Vocabulary' });
 
-        try {
-            if (await this.app.vault.adapter.exists(this.fileName)) {
-                rawContent = await this.app.vault.adapter.read(this.fileName);
-            } else {
-                new Notice(`File "${this.fileName}" not found at the root. Initializing empty table.`);
-            }
-        } catch (error) {
-            console.error('Failed to read lexicon file:', error);
-            new Notice('Error parsing lexicon data.');
-        }
+		const loadingIndicator = contentEl.createEl('p', {
+			text: 'Loading vocabulary items...',
+			cls: 'loading-text',
+		});
+		let rawContent = '';
 
-        loadingIndicator.remove();
+		try {
+			if (await this.app.vault.adapter.exists(this.fileName)) {
+				rawContent = await this.app.vault.adapter.read(this.fileName);
+			} else {
+				new Notice(`File "${this.fileName}" not found at the root. Initializing an empty list.`);
+			}
+		} catch (error) {
+			console.error('Failed to read lexicon file:', error);
+			new Notice('Error loading vocabulary data.');
+		}
 
-        const table = contentEl.createEl('table', { cls: 'modal-table' });
-        table.style.width = '100%';
-        table.style.borderCollapse = 'collapse';
-        table.style.marginBottom = '1rem';
+		loadingIndicator.remove();
 
-        const thead = table.createTHead();
-        const headerRow = thead.insertRow();
-        ['Term', 'Definition', 'Context / Tag'].forEach(text => {
-            const th = headerRow.createEl('th');
-            th.textContent = text;
-            th.style.border = '1px solid var(--background-modifier-border)';
-            th.style.padding = '8px';
-            th.style.backgroundColor = 'var(--background-secondary)';
-        });
+		const entriesEl = contentEl.createDiv({ cls: 'lexicon-entries' });
+		const entries: LexiconEntryInputs[] = [];
 
-        const tbody = table.createTBody();
+		const addEntry = (
+			initialValues: string[] = ['', '', ''],
+			expanded = true,
+			initialTags?: string[],
+		) => {
+			const entry = entriesEl.createEl('details', { cls: 'lexicon-entry' });
+			entry.open = expanded;
 
-        const addRow = (initialValues: string[] = ['', '', '']) => {
-            const row = tbody.insertRow();
-            for (let i = 0; i < 3; i++) {
-                const cell = row.insertCell();
-                cell.style.border = '1px solid var(--background-modifier-border)';
-                cell.style.padding = '4px';
+			const summary = entry.createEl('summary', {
+				text: initialValues[0] || 'New vocabulary item',
+				cls: 'lexicon-entry-summary',
+			});
+			const fieldsEl = entry.createDiv({ cls: 'lexicon-entry-fields' });
+			const entryIndex = entries.length;
+			const createField = (label: string, value: string, index: number) => {
+				const field = fieldsEl.createDiv({ cls: 'lexicon-entry-field' });
+				const inputId = `lexicon-field-${entryIndex}-${index}`;
+				field.createEl('label', { text: label, attr: { for: inputId } });
+				return field.createEl('input', {
+					type: 'text',
+					value,
+					placeholder: label,
+					attr: { id: inputId },
+				});
+			};
 
-                const input = document.createElement('input');
-                input.type = 'text';
-                input.value = initialValues[i] || '';
-                input.style.width = '100%';
-                input.style.background = 'transparent';
-                input.style.border = 'none';
-                input.style.color = 'var(--text-normal)';
-                cell.appendChild(input);
-            }
-        };
+			const rowInputs: LexiconEntryInputs = {
+				term: createField('Term', initialValues[0] || '', 0),
+				definition: createField('Definition', initialValues[1] || '', 1),
+				tags: [],
+			};
+			entries.push(rowInputs);
 
-        if (rawContent.trim().length > 0) {
-            const lines = rawContent.split(/\r?\n/).filter(line => line.trim().length > 0);
-            lines.forEach(line => {
-                const fields = line.split(',').map(f => f.trim());
-                addRow([fields[0] || '', fields[1] || '', fields[2] || '']);
-            });
-        } else {
-            addRow();
-            addRow();
-        }
+			rowInputs.term.addEventListener('input', () => {
+				summary.textContent = rowInputs.term.value || 'New vocabulary item';
+			});
 
-        const actionsDiv = contentEl.createDiv({ cls: 'modal-actions' });
-        actionsDiv.style.marginTop = '15px';
+			const tagField = fieldsEl.createDiv({ cls: 'lexicon-entry-field' });
+			tagField.createEl('label', { text: 'Context / tags' });
+			const tagList = tagField.createDiv({ cls: 'lexicon-tag-list' });
 
-        const addButton = actionsDiv.createEl('button', { text: '+ Add Row' });
-        addButton.style.marginRight = '8px';
-        addButton.onclick = () => addRow();
+			const addTag = (value = '') => {
+				const tagRow = tagList.createDiv({ cls: 'lexicon-tag-row' });
+				const input = tagRow.createEl('input', {
+					type: 'text',
+					value,
+					placeholder: 'Tag',
+					attr: { 'aria-label': 'Tag' },
+				});
+				const swapButton = tagRow.createEl('button', {
+					text: 'Swap with term',
+					attr: { type: 'button', 'aria-label': 'Swap tag with term' },
+				});
+				swapButton.addEventListener('click', () => {
+					const term = rowInputs.term.value;
+					rowInputs.term.value = input.value;
+					input.value = term;
+					rowInputs.term.dispatchEvent(new Event('input'));
+				});
+				const removeButton = tagRow.createEl('button', {
+					text: 'Remove',
+					attr: { type: 'button', 'aria-label': 'Remove tag' },
+				});
+				removeButton.addEventListener('click', () => {
+					tagRow.remove();
+					const inputIndex = rowInputs.tags.indexOf(input);
+					if (inputIndex !== -1) {
+						rowInputs.tags.splice(inputIndex, 1);
+					}
+				});
+				rowInputs.tags.push(input);
+			};
 
-        const saveButton = actionsDiv.createEl('button', { text: 'Save Updates', cls: 'mod-cta' });
-        saveButton.onclick = async () => {
-            const rowsData: string[] = [];
-            
-            Array.from(tbody.rows).forEach(tr => {
-                const rowValues = Array.from(tr.cells).map(cell => {
-                    const input = cell.querySelector('input');
-                    return input ? input.value.replace(/,/g, '') : '';
-                });
-                
-                if (rowValues.some(val => val.trim() !== '')) {
-                    rowsData.push(rowValues.join(', '));
-                }
-            });
+			const tags = initialTags ?? (
+				initialValues[2]
+					? initialValues[2].split(';').map(tag => tag.trim()).filter(Boolean)
+					: ['']
+			);
+			tags.forEach(tag => addTag(tag));
 
-            const newContent = rowsData.join('\n');
-            
-            try {
-                await this.app.vault.adapter.write(this.fileName, newContent);
-                new Notice('Lexicon data successfully overwritten!');
-                this.close();
-            } catch (err) {
-                console.error('Error writing lexicon back to vault:', err);
-                new Notice('Failed to export changes.');
-            }
-        };
-    }
+			const addTagButton = tagField.createEl('button', {
+				text: 'Add tag',
+				attr: { type: 'button' },
+			});
+			addTagButton.addEventListener('click', () => addTag());
+		};
 
-    onClose() {
-        const { contentEl } = this;
-        contentEl.empty();
-    }
+		if (rawContent.trim().length > 0) {
+			const lines = rawContent.split(/\r?\n/).filter(line => line.trim().length > 0);
+			lines.forEach(line => {
+				const fields = line.split(',').map(field => field.trim());
+				addEntry([fields[0] || '', fields[1] || '', fields[2] || ''], false);
+			});
+		} else {
+			addEntry();
+			addEntry();
+		}
+
+		const actionsDiv = contentEl.createDiv({ cls: 'modal-actions' });
+		const addButton = actionsDiv.createEl('button', { text: 'Add row' });
+		addButton.onclick = () => addEntry();
+
+		const saveButton = actionsDiv.createEl('button', {
+			text: 'Save updates',
+			cls: 'mod-cta',
+		});
+		saveButton.onclick = async () => {
+			const rowsData = entries
+				.map(entry => [
+					entry.term.value,
+					entry.definition.value,
+					entry.tags.map(tag => tag.value).filter(tag => tag.trim() !== '').join('; '),
+				].map(value => value.replace(/,/g, '')))
+				.filter(values => values.some(value => value.trim() !== ''))
+				.map(values => values.join(', '));
+
+			try {
+				await this.app.vault.adapter.write(this.fileName, rowsData.join('\n'));
+				new Notice('Lexicon data successfully overwritten!');
+				this.close();
+			} catch (error) {
+				console.error('Error writing lexicon back to vault:', error);
+				new Notice('Failed to export changes.');
+			}
+		};
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
 }
