@@ -2,6 +2,8 @@ import { App, Modal, Notice } from 'obsidian';
 import {
 	countTotalUsages,
 	createUsageCounter,
+	findCommonWordCandidates,
+	loadCommonWords,
 	normalizeSynonym,
 	replaceSynonymWords,
 	scanRefactorCandidates,
@@ -102,7 +104,13 @@ export class LexiconModal extends Modal {
 	 * @param app Obsidian app instance used by the modal.
 	 * @param fileName Vault-relative path of the lexicon data file.
 	 */
-	constructor(app: App, fileName: string = 'vocabulary.lexicon') {
+	constructor(
+		app: App,
+		fileName: string = 'vocabulary.lexicon',
+		private pluginDirectory?: string,
+		private confirmedCommonTerms: string[] = [],
+		private persistCommonTermConfirmations: () => Promise<void> = async () => {},
+	) {
 		super(app);
 		this.fileName = fileName;
 	}
@@ -366,6 +374,7 @@ export class LexiconModal extends Modal {
 		});
 		refactorButton.onclick = () => refactorEntries(entries, refactorButton);
 		const app = this.app;
+		const pluginDirectory = this.pluginDirectory;
 		const modalEl = this.modalEl;
 
 		async function refactorEntries(
@@ -417,6 +426,27 @@ export class LexiconModal extends Modal {
 			button.disabled = true;
 			const progress = contentEl.createEl('p', { cls: 'loading-text' });
 			try {
+				const commonWords = await loadCommonWords(app, pluginDirectory);
+				const candidates = targetEntries.flatMap(entry => [
+					{ value: entry.term.value, type: 'term' as const },
+					...entry.synonyms.map(synonym => ({
+						value: synonym.value,
+						type: 'synonym' as const,
+					})),
+				]);
+
+				for (const match of findCommonWordCandidates(candidates, commonWords)) {
+					const confirmed = await confirmAction(
+						app,
+						'Common word detected',
+						`The ${match.type} "${match.value.trim()}" appears in common_words.txt. Continue refactoring?`,
+						'Continue',
+					);
+					if (!confirmed) {
+						return;
+					}
+				}
+
 				// Scan first so the user can approve each larger-word match before writing.
 				const scan = await scanRefactorCandidates(app, rules, (completed, total) => {
 					progress.setText(`Checking Markdown files (${completed}/${total})...`);
@@ -555,6 +585,51 @@ export class LexiconModal extends Modal {
 				].map(value => value.replace(/,/g, '')))
 				.filter(values => values.some(value => value.trim() !== ''))
 				.map(values => values.join(', '));
+
+			let commonWords: Set<string>;
+			try {
+				commonWords = await loadCommonWords(app, pluginDirectory);
+			} catch (error) {
+				console.error('Unable to check terms against the common-word list:', error);
+				new Notice(error instanceof Error ? error.message : 'Unable to check common words. Updates were not saved.');
+				return;
+			}
+
+			const commonTerms = new Map<string, string>();
+			findCommonWordCandidates(
+				entries.map(entry => ({ value: entry.term.value, type: 'term' as const })),
+				commonWords,
+			).forEach(({ value }) => {
+				const normalizedTerm = normalizeSynonym(value);
+				if (
+					normalizedTerm &&
+					!this.confirmedCommonTerms.includes(normalizedTerm) &&
+					!commonTerms.has(normalizedTerm)
+				) {
+					commonTerms.set(normalizedTerm, value.trim());
+				}
+			});
+
+			for (const [normalizedTerm, term] of commonTerms) {
+				const confirmed = await confirmAction(
+					app,
+					'Common word in term',
+					`The term "${term}" appears in common_words.txt. Save these updates anyway?`,
+					'Save updates',
+				);
+				if (!confirmed) {
+					return;
+				}
+				this.confirmedCommonTerms.push(normalizedTerm);
+				try {
+					await this.persistCommonTermConfirmations();
+				} catch (error) {
+					this.confirmedCommonTerms.pop();
+					console.error('Unable to persist the common-term confirmation:', error);
+					new Notice('Could not remember this confirmation. Updates were not saved.');
+					return;
+				}
+			}
 
 			try {
 				await this.app.vault.adapter.write(this.fileName, rowsData.join('\n'));

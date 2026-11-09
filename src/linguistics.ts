@@ -13,6 +13,11 @@ export interface SynonymReplacementRule {
 	term: string;
 }
 
+export interface CommonWordCandidate {
+	value: string;
+	type: 'term' | 'synonym';
+}
+
 /**
  * The Markdown snapshot and larger words collected during a refactor scan.
  *
@@ -40,6 +45,45 @@ export function countTotalUsages(values: string[], getUsageCount: UsageCounter):
  */
 export function normalizeSynonym(synonym: string): string {
 	return synonym.trim().replace(/^#+/, '').toLowerCase();
+}
+
+/**
+ * Loads the plugin's newline-delimited common-word list from its vault folder.
+ *
+ * @param app Obsidian app used to read the resource through the vault adapter.
+ * @param pluginDirectory Vault-relative directory from the plugin manifest.
+ * @returns Lowercase words with blank lines omitted.
+ * @throws If the plugin directory is unavailable or the resource cannot be read.
+ */
+export async function loadCommonWords(app: App, pluginDirectory?: string): Promise<Set<string>> {
+	if (!pluginDirectory) {
+		throw new Error('Cannot locate the plugin folder to load resources/common_words.txt.');
+	}
+
+	const resourcePath = `${pluginDirectory}/resources/common_words.txt`;
+	let content: string;
+	try {
+		content = await app.vault.adapter.read(resourcePath);
+	} catch {
+		throw new Error(`Could not load "${resourcePath}". Refactor was cancelled.`);
+	}
+
+	return new Set(
+		content.split(/\r?\n/)
+			.map(word => word.trim().toLowerCase())
+			.filter(Boolean),
+	);
+}
+
+/**
+ * Returns each non-empty term or synonym whose complete value is a common word.
+ * Matching ignores case and surrounding whitespace but does not match substrings.
+ */
+export function findCommonWordCandidates(
+	candidates: CommonWordCandidate[],
+	commonWords: Set<string>,
+): CommonWordCandidate[] {
+	return candidates.filter(candidate => commonWords.has(normalizeSynonym(candidate.value)));
 }
 
 /**

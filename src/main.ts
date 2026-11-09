@@ -27,11 +27,23 @@ export default class MyPlugin extends Plugin {
 		this.addCommand({
 			id: 'open-lexicon-modal',
 			name: 'Open lexicon modal',
-			callback: () => new LexiconModal(this.app).open(),
+			callback: () => new LexiconModal(
+				this.app,
+				'vocabulary.lexicon',
+				this.manifest.dir,
+				this.settings.confirmedCommonTerms,
+				() => this.saveSettings(),
+			).open(),
 		});
 
 		this.addRibbonIcon('book-open', 'Open lexicon modal', () => {
-			new LexiconModal(this.app).open();
+			new LexiconModal(
+				this.app,
+				'vocabulary.lexicon',
+				this.manifest.dir,
+				this.settings.confirmedCommonTerms,
+				() => this.saveSettings(),
+			).open();
 		});
 
 		// Prints All Files in Vault
@@ -74,12 +86,7 @@ export default class MyPlugin extends Plugin {
 		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new SampleSettingTab(this.app, this));
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(activeDocument, 'click', (_evt: MouseEvent) => {
-			new Notice('Click');
-		});
-
+	
 		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
 		this.registerInterval(
 			window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000),

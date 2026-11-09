@@ -3,10 +3,12 @@ import MyPlugin from './main';
 
 export interface MyPluginSettings {
 	mySetting: string;
+	confirmedCommonTerms: string[];
 }
 
 export const DEFAULT_SETTINGS: MyPluginSettings = {
 	mySetting: 'default',
+	confirmedCommonTerms: [],
 };
 
 export class SampleSettingTab extends PluginSettingTab {
