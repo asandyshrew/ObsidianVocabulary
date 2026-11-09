@@ -1,28 +1,27 @@
 import { ItemView, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
 import type { EventRef } from 'obsidian';
-import { stemmer } from 'stemmer';
-import lemmatizer from 'wink-lemmatizer';
-import { loadCommonWords } from '../utils/linguistics';
+import { loadCommonWords, loadStopwords } from '../utils/linguistics';
+import { normalizeWordForGrouping } from '../utils/UsageIndex';
+import type { GroupingMode, UsageIndex } from '../utils/UsageIndex';
 
 export const WORD_FREQUENCY_VIEW_TYPE = 'obsidian-vocabulary-word-frequency';
-const MAX_FILE_SIZE_BYTES = 512 * 1024;
 const REFRESH_INTERVAL_MS = 30_000;
-const SCAN_YIELD_INTERVAL = 2_000;
-const RENDER_BATCH_SIZE = 100;
-
-function yieldToUI(): Promise<void> {
-	return new Promise(resolve => window.setTimeout(resolve, 0));
-}
+const YIELD_INTERVAL = 2_000;
 
 interface WordFrequency {
 	word: string;
 	count: number;
 }
 
-interface FileWordCounts {
-	mtime: number;
-	size: number;
-	counts?: Map<string, number>;
+interface WordFrequencyRow {
+	item: HTMLLIElement;
+	bar: HTMLSpanElement;
+	barFill: HTMLSpanElement;
+	count: HTMLSpanElement;
+}
+
+function yieldToUI(): Promise<void> {
+	return new Promise(resolve => window.setTimeout(resolve, 0));
 }
 
 export class WordFrequencyView extends ItemView {
@@ -30,34 +29,41 @@ export class WordFrequencyView extends ItemView {
 	private searchInput?: HTMLInputElement;
 	private filterMenuEl?: HTMLDivElement;
 	private filterMenuButton?: HTMLButtonElement;
-	private groupingButtons = new Map<'none' | 'stem' | 'lemma', HTMLButtonElement>();
+	private groupingButtons = new Map<GroupingMode, HTMLButtonElement>();
 	private singleFileCheckbox?: HTMLInputElement;
 	private commonWordsCheckbox?: HTMLInputElement;
 	private hideCommonWordsCheckbox?: HTMLInputElement;
 	private listEl?: HTMLUListElement;
+	private wordRows = new Map<string, WordFrequencyRow>();
 	private words: WordFrequency[] = [];
 	private sourceLabel = 'in the workspace';
-	private pluginDirectory?: string;
 	private commonWords?: Set<string>;
+	private stopwords?: Set<string>;
+	private effectiveStopwords = new Set<string>();
 	private excludingCommonWords = false;
 	private hidingCommonWords = false;
-	private groupingMode: 'none' | 'stem' | 'lemma' = 'none';
-	private refreshTimer?: number;
+	private groupingMode: GroupingMode = 'none';
 	private intervalId?: number;
-	private largeFileAlertTimeout?: number;
-	private largeFileAlert?: HTMLDivElement;
-	private hasShownLargeFileAlert = false;
+	private refreshTimer?: number;
 	private scanId = 0;
 	private renderId = 0;
-	private scanInProgress = false;
-	private refreshRequested = false;
-	private fileWordCounts = new Map<string, FileWordCounts>();
+	private frequencyUpdateId = 0;
+	private rowVisibilityObserver?: IntersectionObserver;
+	private visibleWordRows = new Set<HTMLLIElement>();
+	private hasShownLargeFileAlert = false;
+	private largeFileAlert?: HTMLElement;
+	private largeFileAlertTimer?: number;
+	private vaultEventRefs: EventRef[] = [];
+	private metadataEventRef?: EventRef;
 	private workspaceEventRef?: EventRef;
 	private outsideClickHandler?: (event: MouseEvent) => void;
 
-	constructor(leaf: WorkspaceLeaf, pluginDirectory?: string) {
+	constructor(
+		leaf: WorkspaceLeaf,
+		private usageIndex: UsageIndex,
+		private pluginDirectory?: string,
+	) {
 		super(leaf);
-		this.pluginDirectory = pluginDirectory;
 	}
 
 	getViewType(): string {
@@ -115,9 +121,9 @@ export class WordFrequencyView extends ItemView {
 			}
 		});
 
-		const modeLabel = this.filterMenuEl.createEl('label', { cls: 'word-frequency-mode' });
-		this.singleFileCheckbox = modeLabel.createEl('input', { type: 'checkbox' });
-		modeLabel.appendText(' Count active file only');
+		const singleFileLabel = this.filterMenuEl.createEl('label', { cls: 'word-frequency-mode' });
+		this.singleFileCheckbox = singleFileLabel.createEl('input', { type: 'checkbox' });
+		singleFileLabel.appendText(' Count active file only');
 		this.singleFileCheckbox.addEventListener('change', () => {
 			void this.refreshCounts();
 		});
@@ -162,7 +168,48 @@ export class WordFrequencyView extends ItemView {
 			attr: { role: 'status', 'aria-live': 'polite' },
 		});
 		this.listEl = this.contentEl.createEl('ul', { cls: 'word-frequency-list' });
+		this.rowVisibilityObserver = new IntersectionObserver(entries => {
+			entries.forEach(entry => {
+				const row = entry.target as HTMLLIElement;
+				if (entry.isIntersecting) {
+					this.visibleWordRows.add(row);
+				} else {
+					this.visibleWordRows.delete(row);
+				}
+			});
+		}, { root: this.listEl });
+		this.showSkeleton();
 
+		this.vaultEventRefs.push(this.app.vault.on('create', file => {
+			if (this.isMarkdownFile(file)) {
+				this.scheduleRefresh();
+			}
+		}));
+		this.vaultEventRefs.push(this.app.vault.on('modify', file => {
+			if (this.isMarkdownFile(file) || file.path === this.stopwordsResourcePath()) {
+				this.scheduleRefresh();
+			}
+		}));
+		this.vaultEventRefs.push(this.app.vault.on('create', file => {
+			if (file.path === this.stopwordsResourcePath()) {
+				this.scheduleRefresh();
+			}
+		}));
+		this.vaultEventRefs.push(this.app.vault.on('delete', file => {
+			if (this.isMarkdownFile(file)) {
+				this.scheduleRefresh();
+			}
+		}));
+		this.vaultEventRefs.push(this.app.vault.on('rename', (file, oldPath) => {
+			if (this.isMarkdownFile(file) || oldPath.toLowerCase().endsWith('.md')) {
+				this.scheduleRefresh();
+			}
+		}));
+		this.metadataEventRef = this.app.metadataCache.on('changed', file => {
+			if (this.isMarkdownFile(file)) {
+				this.scheduleRefresh();
+			}
+		});
 		this.workspaceEventRef = this.app.workspace.on('active-leaf-change', () => {
 			if (this.singleFileCheckbox?.checked) {
 				this.scheduleRefresh();
@@ -178,13 +225,11 @@ export class WordFrequencyView extends ItemView {
 		};
 		document.addEventListener('click', this.outsideClickHandler);
 
-		await this.refreshCounts();
+		void this.refreshCounts();
 	}
 
 	async onClose(): Promise<void> {
 		this.scanId++;
-		this.renderId++;
-		this.refreshRequested = false;
 		if (this.refreshTimer !== undefined) {
 			window.clearTimeout(this.refreshTimer);
 			this.refreshTimer = undefined;
@@ -193,12 +238,21 @@ export class WordFrequencyView extends ItemView {
 			window.clearInterval(this.intervalId);
 			this.intervalId = undefined;
 		}
-		if (this.largeFileAlertTimeout !== undefined) {
-			window.clearTimeout(this.largeFileAlertTimeout);
-			this.largeFileAlertTimeout = undefined;
+		if (this.largeFileAlertTimer !== undefined) {
+			window.clearTimeout(this.largeFileAlertTimer);
+			this.largeFileAlertTimer = undefined;
 		}
 		this.largeFileAlert?.remove();
 		this.largeFileAlert = undefined;
+		this.rowVisibilityObserver?.disconnect();
+		this.rowVisibilityObserver = undefined;
+		this.visibleWordRows.clear();
+		this.vaultEventRefs.forEach(eventRef => this.app.vault.offref(eventRef));
+		this.vaultEventRefs = [];
+		if (this.metadataEventRef) {
+			this.app.metadataCache.offref(this.metadataEventRef);
+			this.metadataEventRef = undefined;
+		}
 		if (this.workspaceEventRef) {
 			this.app.workspace.offref(this.workspaceEventRef);
 			this.workspaceEventRef = undefined;
@@ -224,14 +278,14 @@ export class WordFrequencyView extends ItemView {
 		this.filterMenuButton?.setAttribute('aria-expanded', 'false');
 	}
 
-	private setGroupingMode(mode: 'none' | 'stem' | 'lemma'): void {
+	private setGroupingMode(mode: GroupingMode): void {
 		this.groupingMode = mode;
 		this.groupingButtons.forEach((button, buttonMode) => {
-			const isSelected = buttonMode === mode;
-			button.setAttribute('aria-pressed', String(isSelected));
-			button.toggleClass('is-active', isSelected);
+			const selected = buttonMode === mode;
+			button.setAttribute('aria-pressed', String(selected));
+			button.toggleClass('is-active', selected);
 		});
-		void this.renderWords();
+		void this.refreshCounts();
 	}
 
 	private isMarkdownFile(file: unknown): file is TFile {
@@ -254,12 +308,10 @@ export class WordFrequencyView extends ItemView {
 				this.commonWordsCheckbox.checked = false;
 			}
 			this.excludingCommonWords = false;
-			void this.renderWords();
-			return;
+		} else {
+			this.excludingCommonWords = this.commonWordsCheckbox?.checked ?? false;
 		}
-
-		this.excludingCommonWords = this.commonWordsCheckbox?.checked ?? false;
-		void this.renderWords();
+		await this.renderWords();
 	}
 
 	private async updateHideCommonWords(): Promise<void> {
@@ -268,12 +320,10 @@ export class WordFrequencyView extends ItemView {
 				this.hideCommonWordsCheckbox.checked = false;
 			}
 			this.hidingCommonWords = false;
-			void this.renderWords();
-			return;
+		} else {
+			this.hidingCommonWords = this.hideCommonWordsCheckbox?.checked ?? false;
 		}
-
-		this.hidingCommonWords = this.hideCommonWordsCheckbox?.checked ?? false;
-		void this.renderWords();
+		await this.renderWords();
 	}
 
 	private async ensureCommonWordsLoaded(): Promise<boolean> {
@@ -289,148 +339,65 @@ export class WordFrequencyView extends ItemView {
 		return true;
 	}
 
-	private async refreshCounts(): Promise<void> {
-		if (this.scanInProgress) {
-			this.refreshRequested = true;
+	private setStatusLoading(text: string): void {
+		if (!this.statusEl) {
 			return;
 		}
-
-		this.scanInProgress = true;
-		try {
-			await this.scanWordCounts();
-		} finally {
-			this.scanInProgress = false;
-			if (this.refreshRequested) {
-				this.refreshRequested = false;
-				void this.refreshCounts();
-			}
-		}
+		this.statusEl.empty();
+		this.statusEl.createSpan({ cls: 'word-frequency-loading-spinner', attr: { 'aria-hidden': 'true' } });
+		this.statusEl.createSpan({ text });
 	}
 
-	private async scanWordCounts(): Promise<void> {
+	private async refreshCounts(): Promise<void> {
 		const scanId = ++this.scanId;
 		const activeFileOnly = this.singleFileCheckbox?.checked ?? false;
 		const activeFile = activeFileOnly ? this.app.workspace.getActiveFile() : null;
 		if (activeFileOnly && !this.isMarkdownFile(activeFile)) {
 			this.words = [];
-			void this.renderWords();
+			this.clearWordRows();
 			this.statusEl?.setText('Open a Markdown file to count its words.');
 			return;
 		}
-		const allFiles = this.app.vault.getMarkdownFiles();
-		const files = activeFileOnly && this.isMarkdownFile(activeFile)
-			? [activeFile]
-			: allFiles;
+
 		this.sourceLabel = activeFileOnly && this.isMarkdownFile(activeFile)
 			? `in ${activeFile.path}`
 			: 'in the workspace';
-
+		if (this.wordRows.size === 0) {
+			this.showSkeleton();
+		}
+		this.setStatusLoading('Updating word counts...');
 		try {
-			const currentPaths = new Set(allFiles.map(file => file.path));
-			this.fileWordCounts.forEach((_, path) => {
-				if (!currentPaths.has(path)) {
-					this.fileWordCounts.delete(path);
-				}
-			});
-			let changedFiles = 0;
-			let oversizedFilesFound = false;
-			for (const [index, file] of files.entries()) {
-				if (scanId !== this.scanId) {
-					return;
-				}
-				const { mtime, size } = file.stat;
-				const cached = this.fileWordCounts.get(file.path);
-				if (size > MAX_FILE_SIZE_BYTES) {
-					this.fileWordCounts.set(file.path, { mtime, size });
-					oversizedFilesFound = true;
-					if ((index + 1) % 20 === 0) {
-						this.statusEl?.setText(
-							`Checking Markdown files (${index + 1}/${files.length}; ${changedFiles} changed)...`,
-						);
-						await yieldToUI();
-					}
-					continue;
-				}
-
-				if (cached?.mtime === mtime && cached.size === size) {
-					if ((index + 1) % 20 === 0) {
-						this.statusEl?.setText(
-							`Checking Markdown files (${index + 1}/${files.length}; ${changedFiles} changed)...`,
-						);
-						await yieldToUI();
-					}
-					continue;
-				}
-
-				try {
-					const content = await this.app.vault.cachedRead(file);
-					if (scanId !== this.scanId) {
-						return;
-					}
-					const counts = await this.countWords(content, scanId);
-					if (!counts || scanId !== this.scanId) {
-						return;
-					}
-					this.fileWordCounts.set(file.path, { mtime, size, counts });
-					changedFiles++;
-				} catch (error) {
-					console.error(`Failed to scan Markdown file "${file.path}":`, error);
-					if (!cached) {
-						this.fileWordCounts.delete(file.path);
-					}
-				}
-				if ((index + 1) % 20 === 0 || index === files.length - 1) {
-					if (scanId !== this.scanId) {
-						return;
-					}
-					this.statusEl?.setText(
-						`Checking Markdown files (${index + 1}/${files.length}; ${changedFiles} changed)...`,
-					);
-					await yieldToUI();
-				}
-			}
-
+			await this.reloadStopwords();
 			if (scanId !== this.scanId) {
 				return;
 			}
-			if (oversizedFilesFound) {
-				this.showLargeFileAlert();
+			const frequencies = await this.usageIndex.getWordFrequencies(
+				this.groupingMode,
+				activeFileOnly && this.isMarkdownFile(activeFile) ? activeFile : undefined,
+				(completed, total) => {
+					if (scanId === this.scanId && (completed % 20 === 0 || completed === total)) {
+						this.setStatusLoading(`Scanning Markdown files (${completed}/${total})...`);
+					}
+				},
+				async (updatedFrequencies: Map<string, number>, scannedWords: number) => {
+					if (scanId === this.scanId) {
+						await this.updateFrequencyRows(updatedFrequencies, scanId, false, scannedWords);
+					}
+				},
+			);
+			if (scanId !== this.scanId) {
+				return;
 			}
 
-			const counts = new Map<string, number>();
-			let processedWords = 0;
-			for (const file of files) {
-				const fileCounts = this.fileWordCounts.get(file.path)?.counts;
-				if (!fileCounts) {
-					continue;
-				}
-				for (const [word, count] of fileCounts) {
-					counts.set(word, (counts.get(word) ?? 0) + count);
-					processedWords++;
-					if (processedWords % SCAN_YIELD_INTERVAL === 0) {
-						this.statusEl?.setText(`Combining word counts (${processedWords.toLocaleString()})...`);
-						await yieldToUI();
-						if (scanId !== this.scanId) {
-							return;
-						}
-					}
-				}
+			await this.updateFrequencyRows(frequencies, scanId, true);
+			if (scanId !== this.scanId) {
+				return;
 			}
-			this.words = [];
-			let converted = 0;
-			for (const [word, count] of counts) {
-				this.words.push({ word, count });
-				converted++;
-				if (converted % SCAN_YIELD_INTERVAL === 0) {
-					await yieldToUI();
-					if (scanId !== this.scanId) {
-						return;
-					}
-				}
-			}
-			this.words = await this.sortWords(this.words, () => scanId === this.scanId);
-			if (scanId === this.scanId) {
-				void this.renderWords();
+			const skippedFiles = this.usageIndex.getSkippedFiles(
+				activeFileOnly && this.isMarkdownFile(activeFile) ? activeFile : undefined,
+			);
+			if (skippedFiles.length > 0) {
+				this.showLargeFileAlert();
 			}
 		} catch (error) {
 			if (scanId !== this.scanId) {
@@ -442,24 +409,84 @@ export class WordFrequencyView extends ItemView {
 		}
 	}
 
-	private async countWords(content: string, scanId: number): Promise<Map<string, number> | undefined> {
-		const counts = new Map<string, number>();
-		const tokenPattern = /[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu;
-		let token = tokenPattern.exec(content);
-		let processedTokens = 0;
-		while (token) {
-			const word = token[0].toLowerCase();
-			counts.set(word, (counts.get(word) ?? 0) + 1);
-			processedTokens++;
-			if (processedTokens % SCAN_YIELD_INTERVAL === 0) {
+	private stopwordsResourcePath(): string {
+		return `${this.pluginDirectory ?? ''}/resources/stopwords.txt`;
+	}
+
+	private async reloadStopwords(): Promise<void> {
+		this.stopwords = await loadStopwords(this.app, this.pluginDirectory);
+		this.effectiveStopwords = new Set(
+			[...this.stopwords].map(stopword =>
+				normalizeWordForGrouping(stopword, this.groupingMode),
+			),
+		);
+	}
+
+	private showSkeleton(): void {
+		if (
+			!this.listEl ||
+			this.wordRows.size > 0 ||
+			this.listEl.querySelector('.word-frequency-skeleton')
+		) {
+			return;
+		}
+		for (let index = 0; index < 6; index++) {
+			const item = this.listEl.createEl('li', {
+				cls: 'word-frequency-skeleton',
+				attr: { 'aria-hidden': 'true' },
+			});
+			item.createSpan({ cls: 'word-frequency-skeleton-word' });
+			item.createSpan({ cls: 'word-frequency-skeleton-bar' });
+			item.createSpan({ cls: 'word-frequency-skeleton-count' });
+		}
+	}
+
+	private clearWordRows(): void {
+		this.wordRows.forEach(row => row.item.remove());
+		this.wordRows.clear();
+		this.listEl?.querySelectorAll('.word-frequency-skeleton').forEach(element => element.remove());
+	}
+
+	private async updateFrequencyRows(
+		frequencies: Map<string, number>,
+		scanId: number,
+		isFinal: boolean,
+		scannedWords = 0,
+	): Promise<void> {
+		const updateId = ++this.frequencyUpdateId;
+		const isCurrent = () => scanId === this.scanId && updateId === this.frequencyUpdateId;
+		if (!isCurrent()) {
+			return;
+		}
+		const entries = await this.createFrequencyEntries(frequencies, isCurrent);
+		if (!isCurrent()) {
+			return;
+		}
+		this.words = await this.sortWords(entries, isCurrent);
+		if (!isCurrent()) {
+			return;
+		}
+		this.listEl?.querySelectorAll('.word-frequency-skeleton').forEach(element => element.remove());
+		await this.renderWords(scanId, isFinal, scannedWords, updateId);
+	}
+
+	private async createFrequencyEntries(
+		frequencies: Map<string, number>,
+		isCurrent: () => boolean,
+	): Promise<WordFrequency[]> {
+		const words: WordFrequency[] = [];
+		let processed = 0;
+		for (const [word, count] of frequencies) {
+			words.push({ word, count });
+			processed++;
+			if (processed % YIELD_INTERVAL === 0) {
 				await yieldToUI();
-				if (scanId !== this.scanId) {
-					return undefined;
+				if (!isCurrent()) {
+					return [];
 				}
 			}
-			token = tokenPattern.exec(content);
 		}
-		return counts;
+		return words;
 	}
 
 	private async sortWords(
@@ -469,10 +496,9 @@ export class WordFrequencyView extends ItemView {
 		if (words.length < 2) {
 			return words;
 		}
-
 		let source = words;
 		let target = new Array<WordFrequency>(words.length);
-		let processed = 0;
+		let comparisons = 0;
 		for (let width = 1; width < words.length; width *= 2) {
 			for (let start = 0; start < words.length; start += width * 2) {
 				const middle = Math.min(start + width, words.length);
@@ -499,9 +525,9 @@ export class WordFrequencyView extends ItemView {
 						target[output] = rightWord;
 						right++;
 					}
-					processed++;
-					if (processed % SCAN_YIELD_INTERVAL === 0) {
-						await yieldToUI();
+					comparisons++;
+					if (comparisons % YIELD_INTERVAL === 0) {
+						await new Promise(resolve => window.setTimeout(resolve, 0));
 						if (!isCurrent()) {
 							return [];
 						}
@@ -513,158 +539,168 @@ export class WordFrequencyView extends ItemView {
 		return source;
 	}
 
+	private async renderWords(
+		scanId = this.scanId,
+		isFinal = true,
+		scannedWords = 0,
+		frequencyUpdateId = this.frequencyUpdateId,
+	): Promise<void> {
+		if (!this.listEl || !this.statusEl || !this.searchInput) {
+			return;
+		}
+		const renderId = ++this.renderId;
+		const isCurrent = () =>
+			scanId === this.scanId &&
+			renderId === this.renderId &&
+			frequencyUpdateId === this.frequencyUpdateId;
+		const query = this.searchInput.value.trim().toLowerCase();
+		const shouldHideCommon = (this.excludingCommonWords || this.hidingCommonWords) && this.commonWords;
+		const visibleWords: WordFrequency[] = [];
+		const denominatorWords: WordFrequency[] = [];
+		for (let index = 0; index < this.words.length; index++) {
+			if (!isCurrent()) {
+				return;
+			}
+			const entry = this.words[index];
+			if (!entry) {
+				continue;
+			}
+			const isStopword = this.isStopword(entry.word);
+			const isCommon = shouldHideCommon && this.commonWords?.has(entry.word);
+			if (!isStopword && (!this.excludingCommonWords || !isCommon)) {
+				denominatorWords.push(entry);
+			}
+			if (
+				!isStopword &&
+				(!shouldHideCommon || !isCommon) &&
+				(!query || entry.word.includes(query))
+			) {
+				visibleWords.push(entry);
+			}
+			if ((index + 1) % YIELD_INTERVAL === 0) {
+				await new Promise(resolve => window.setTimeout(resolve, 0));
+			}
+		}
+
+		let totalCount = 0;
+		for (let index = 0; index < denominatorWords.length; index++) {
+			const entry = denominatorWords[index];
+			if (entry) {
+				totalCount += entry.count;
+			}
+			if ((index + 1) % YIELD_INTERVAL === 0) {
+				await new Promise(resolve => window.setTimeout(resolve, 0));
+			}
+		}
+		if (!isCurrent()) {
+			return;
+		}
+		this.statusEl.setText(isFinal
+			? `${visibleWords.length.toLocaleString()} words ${this.sourceLabel}`
+			: `Scanning ${scannedWords.toLocaleString()} words ${this.sourceLabel}`);
+		const liveWords = new Set(this.words.map(entry => entry.word));
+		const previousPositions = new Map<HTMLLIElement, number>();
+		this.visibleWordRows.forEach(row => {
+			if (row.isConnected && !row.hidden) {
+				previousPositions.set(row, row.getBoundingClientRect().top);
+			}
+		});
+		let rowPosition = 0;
+		for (let index = 0; index < this.words.length; index++) {
+			if (!isCurrent()) {
+				return;
+			}
+			const entry = this.words[index];
+			if (!entry) {
+				continue;
+			}
+			let row = this.wordRows.get(entry.word);
+			if (!row) {
+				row = this.createWordRow(entry.word);
+				this.wordRows.set(entry.word, row);
+			}
+			const isCommon = shouldHideCommon && this.commonWords?.has(entry.word);
+			const isStopword = this.isStopword(entry.word);
+			const isVisible = !isStopword &&
+				(!shouldHideCommon || !isCommon) &&
+				(!query || entry.word.includes(query));
+			row.item.hidden = !isVisible;
+			const currentRow = this.listEl.children.item(rowPosition);
+			if (currentRow !== row.item) {
+				this.listEl.insertBefore(row.item, currentRow);
+			}
+			row.count.setText(entry.count.toLocaleString());
+			const relativeFrequency = totalCount > 0 ? entry.count / totalCount : 0;
+			const relativePercent = relativeFrequency * 100;
+			row.bar.setAttribute(
+				'aria-label',
+				`Relative frequency: ${relativePercent.toFixed(2)}% of all words`,
+			);
+			row.barFill.style.width = `${relativePercent}%`;
+			rowPosition++;
+		}
+		if (isFinal) {
+			for (const [word, row] of this.wordRows) {
+				if (!liveWords.has(word)) {
+					this.rowVisibilityObserver?.unobserve(row.item);
+					this.visibleWordRows.delete(row.item);
+					row.item.remove();
+					this.wordRows.delete(word);
+				}
+			}
+		}
+		if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+			this.visibleWordRows.forEach(row => {
+				const previousTop = previousPositions.get(row);
+				if (previousTop === undefined || !row.isConnected || row.hidden) {
+					return;
+				}
+				const deltaY = previousTop - row.getBoundingClientRect().top;
+				if (Math.abs(deltaY) >= 1) {
+					row.animate(
+						[{ transform: `translateY(${deltaY}px)` }, { transform: 'translateY(0)' }],
+						{ duration: 180, easing: 'ease-out' },
+					);
+				}
+			});
+		}
+		if (visibleWords.length === 0 && isFinal) {
+			this.statusEl.setText(`No matching words ${this.sourceLabel}`);
+		}
+	}
+
+	private createWordRow(word: string): WordFrequencyRow {
+		const item = this.listEl!.createEl('li');
+		this.rowVisibilityObserver?.observe(item);
+		item.createSpan({ text: word, cls: 'word-frequency-word' });
+		const bar = item.createSpan({
+			cls: 'word-frequency-bar',
+			attr: { role: 'img', 'aria-label': 'Relative frequency: 0.00% of all words' },
+		});
+		const barFill = bar.createSpan({ cls: 'word-frequency-bar-fill' });
+		const count = item.createSpan({ text: '0', cls: 'word-frequency-count' });
+		return { item, bar, barFill, count };
+	}
+
+	private isStopword(word: string): boolean {
+		return this.stopwords?.has(word) === true || this.effectiveStopwords.has(word);
+	}
+
 	private showLargeFileAlert(): void {
 		if (this.hasShownLargeFileAlert) {
 			return;
 		}
 		this.hasShownLargeFileAlert = true;
-		this.largeFileAlert = document.body.createDiv({
+		const alert = document.body.createDiv({
 			cls: 'word-frequency-large-file-alert',
 			text: 'Some Markdown files larger than 512 KB were skipped.',
 			attr: { role: 'alert' },
 		});
-		this.largeFileAlertTimeout = window.setTimeout(() => {
-			this.largeFileAlert?.remove();
+		this.largeFileAlert = alert;
+		this.largeFileAlertTimer = window.setTimeout(() => {
+			alert.remove();
 			this.largeFileAlert = undefined;
-			this.largeFileAlertTimeout = undefined;
-		}, 8000);
-	}
-
-	private async renderWords(): Promise<void> {
-		if (!this.listEl || !this.statusEl || !this.searchInput) {
-			return;
-		}
-
-		const renderId = ++this.renderId;
-		const query = this.searchInput.value.trim().toLowerCase();
-		const words = this.groupingMode === 'stem'
-			? await this.groupWords(this.words, word => stemmer(word), () => renderId === this.renderId)
-			: this.groupingMode === 'lemma'
-				? await this.groupWords(this.words, word => this.lemmatizeWord(word), () => renderId === this.renderId)
-				: this.words;
-		if (renderId !== this.renderId) {
-			return;
-		}
-		const denominatorWords = this.excludingCommonWords && this.commonWords
-			? await this.filterWords(words, ({ word }) => !this.commonWords?.has(word), renderId)
-			: words;
-		const displayWords = (this.excludingCommonWords || this.hidingCommonWords) && this.commonWords
-			? await this.filterWords(words, ({ word }) => !this.commonWords?.has(word), renderId)
-			: words;
-		if (renderId !== this.renderId) {
-			return;
-		}
-		const visibleWords = query
-			? await this.filterWords(displayWords, ({ word }) => word.includes(query), renderId)
-			: displayWords;
-		if (renderId !== this.renderId) {
-			return;
-		}
-		this.statusEl.setText(`${visibleWords.length.toLocaleString()} words ${this.sourceLabel}`);
-		this.listEl.empty();
-		let totalCount = 0;
-		for (let index = 0; index < denominatorWords.length; index++) {
-			const word = denominatorWords[index];
-			if (word) {
-				totalCount += word.count;
-			}
-			if ((index + 1) % SCAN_YIELD_INTERVAL === 0) {
-				await yieldToUI();
-				if (renderId !== this.renderId) {
-					return;
-				}
-			}
-		}
-		for (let index = 0; index < visibleWords.length; index += RENDER_BATCH_SIZE) {
-			if (renderId !== this.renderId) {
-				return;
-			}
-			const batch = visibleWords.slice(index, index + RENDER_BATCH_SIZE);
-			for (const { word, count } of batch) {
-			const item = this.listEl.createEl('li');
-			item.createSpan({ text: word, cls: 'word-frequency-word' });
-			const relativeFrequency = totalCount > 0 ? count / totalCount : 0;
-			const bar = item.createSpan({
-				cls: 'word-frequency-bar',
-				attr: {
-					role: 'img',
-					'aria-label': `Relative frequency: ${(relativeFrequency * 100).toFixed(2)}% of all words`,
-				},
-			});
-			bar.createSpan({
-				cls: 'word-frequency-bar-fill',
-				attr: { style: `width: ${relativeFrequency * 100}%` },
-			});
-			item.createSpan({ text: count.toLocaleString(), cls: 'word-frequency-count' });
-			}
-			await yieldToUI();
-		}
-	}
-
-	private async filterWords(
-		words: WordFrequency[],
-		shouldInclude: (entry: WordFrequency) => boolean,
-		renderId: number,
-	): Promise<WordFrequency[]> {
-		const filtered: WordFrequency[] = [];
-		for (let index = 0; index < words.length; index++) {
-			const entry = words[index];
-			if (entry && shouldInclude(entry)) {
-				filtered.push(entry);
-			}
-			if ((index + 1) % SCAN_YIELD_INTERVAL === 0) {
-				await yieldToUI();
-				if (renderId !== this.renderId) {
-					return [];
-				}
-			}
-		}
-		return filtered;
-	}
-
-	private async groupWords(
-		words: WordFrequency[],
-		getGroup: (word: string) => string,
-		isCurrent: () => boolean,
-	): Promise<WordFrequency[]> {
-		const counts = new Map<string, number>();
-		for (let index = 0; index < words.length; index++) {
-			const entry = words[index];
-			if (!entry) {
-				continue;
-			}
-			const group = getGroup(entry.word);
-			counts.set(group, (counts.get(group) ?? 0) + entry.count);
-			if ((index + 1) % SCAN_YIELD_INTERVAL === 0) {
-				await yieldToUI();
-				if (!isCurrent()) {
-					return [];
-				}
-			}
-		}
-		const grouped: WordFrequency[] = [];
-		let converted = 0;
-		for (const [word, count] of counts) {
-			grouped.push({ word, count });
-			converted++;
-			if (converted % SCAN_YIELD_INTERVAL === 0) {
-				await yieldToUI();
-				if (!isCurrent()) {
-					return [];
-				}
-			}
-		}
-		return this.sortWords(grouped, isCurrent);
-	}
-
-	private lemmatizeWord(word: string): string {
-		const candidates = /(?:ing|ed|en)$/.test(word)
-			? [lemmatizer.verb(word), lemmatizer.noun(word), lemmatizer.adjective(word)]
-			: /(?:ies|ves|men|s)$/.test(word)
-				? [lemmatizer.noun(word), lemmatizer.verb(word), lemmatizer.adjective(word)]
-				: /(?:er|est)$/.test(word)
-					? [lemmatizer.adjective(word), lemmatizer.noun(word), lemmatizer.verb(word)]
-					: [lemmatizer.verb(word), lemmatizer.noun(word), lemmatizer.adjective(word)];
-		return candidates.find(candidate => candidate !== word) ?? word;
+			this.largeFileAlertTimer = undefined;
+		}, 8_000);
 	}
 }

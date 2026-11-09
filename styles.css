@@ -50,6 +50,17 @@ If your plugin does not need CSS, delete this file.
 	color: var(--text-faint);
 }
 
+.lexicon-count-loading {
+	display: inline-block;
+	width: 0.85em;
+	height: 0.85em;
+	border: 2px solid var(--text-faint);
+	border-top-color: var(--interactive-accent);
+	border-radius: 50%;
+	vertical-align: -0.1em;
+	animation: word-frequency-spin 0.8s linear infinite;
+}
+
 .lexicon-entry-fields {
 	display: grid;
 	gap: 0.75rem;
@@ -167,6 +178,18 @@ If your plugin does not need CSS, delete this file.
 	font-size: var(--font-smaller);
 }
 
+.word-frequency-loading-spinner {
+	display: inline-block;
+	width: 0.9em;
+	height: 0.9em;
+	margin-right: 0.4em;
+	border: 2px solid var(--text-faint);
+	border-top-color: var(--interactive-accent);
+	border-radius: 50%;
+	vertical-align: -0.12em;
+	animation: word-frequency-spin 0.8s linear infinite;
+}
+
 .word-frequency-mode {
 	display: flex;
 	align-items: center;
@@ -254,6 +277,36 @@ If your plugin does not need CSS, delete this file.
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
+.word-frequency-list li[hidden] {
+	display: none;
+}
+
+.word-frequency-skeleton {
+	gap: 1rem;
+}
+
+.word-frequency-skeleton-word,
+.word-frequency-skeleton-bar,
+.word-frequency-skeleton-count {
+	display: block;
+	height: 0.8rem;
+	border-radius: var(--radius-s);
+	background-color: var(--background-modifier-border);
+	animation: word-frequency-pulse 1.2s ease-in-out infinite;
+}
+
+.word-frequency-skeleton-word {
+	width: 35%;
+}
+
+.word-frequency-skeleton-bar {
+	flex: 1 1 3rem;
+}
+
+.word-frequency-skeleton-count {
+	width: 2rem;
+}
+
 .word-frequency-word {
 	flex: 0 1 auto;
 	min-width: 0;
@@ -311,5 +364,17 @@ If your plugin does not need CSS, delete this file.
 	40%,
 	80% {
 		translate: 6px 0;
+	}
+}
+
+@keyframes word-frequency-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+@keyframes word-frequency-pulse {
+	50% {
+		opacity: 0.45;
 	}
 }
