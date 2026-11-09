@@ -15,7 +15,7 @@ Obsidian plugin for managing vocabulary terms, definitions, and synonyms in a `v
 src/
   commands/  Command and ribbon registration
   ui/        Vocabulary entry and modal components
-  utils/     Vocabulary counting and text helpers
+  utils/     Shared usage index and vocabulary text helpers
   main.ts    Plugin lifecycle and settings initialization
   settings.ts
 ```

@@ -1,6 +1,7 @@
 import { Plugin } from 'obsidian';
 import { LexiconModal } from '../ui/LexiconModal';
 import type { LexiconModalOptions } from '../ui/LexiconModal';
+import type { UsageIndex } from '../utils/UsageIndex';
 
 /**
  * Registers the command-palette command and ribbon button for opening the
@@ -11,7 +12,7 @@ import type { LexiconModalOptions } from '../ui/LexiconModal';
  */
 export function registerLexiconCommands(
 	plugin: Plugin,
-	options: Omit<LexiconModalOptions, 'fileName'>,
+	options: Omit<LexiconModalOptions, 'fileName' | 'usageIndex'> & { usageIndex: UsageIndex },
 ): void {
 	const openLexiconModal = () => new LexiconModal(plugin.app, options).open();
 

@@ -2,6 +2,7 @@ import { Plugin } from 'obsidian';
 import { registerLexiconCommands } from './commands/registerLexiconCommands';
 import { DEFAULT_SETTINGS } from './settings';
 import type { VocabularyPluginSettings } from './settings';
+import { UsageIndex } from './utils/UsageIndex';
 
 /**
  * Initializes persisted preferences and registers the plugin's entry points.
@@ -9,9 +10,12 @@ import type { VocabularyPluginSettings } from './settings';
 export default class ObsidianVocabularyPlugin extends Plugin {
 	/** Settings persisted through Obsidian's plugin data storage. */
 	settings!: VocabularyPluginSettings;
+	/** Shared vault usage index, scanned once as the plugin loads. */
+	usageIndex!: UsageIndex;
 
 	/** Load settings safely, then register the modal command and ribbon icon. */
 	async onload() {
+		this.usageIndex = new UsageIndex(this.app);
 		const savedSettings = await this.loadData() as Partial<VocabularyPluginSettings> | null;
 		this.settings = {
 			...DEFAULT_SETTINGS,
@@ -25,6 +29,7 @@ export default class ObsidianVocabularyPlugin extends Plugin {
 			pluginDirectory: this.manifest.dir,
 			confirmedCommonTerms: this.settings.confirmedCommonTerms,
 			persistCommonTermConfirmations: () => this.saveSettings(),
+			usageIndex: this.usageIndex,
 		});
 	}
 

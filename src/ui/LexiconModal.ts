@@ -1,6 +1,5 @@
 import { App, Modal, Notice } from 'obsidian';
 import {
-	createUsageCounter,
 	findCommonWordCandidates,
 	loadCommonWords,
 	normalizeSynonym,
@@ -11,6 +10,7 @@ import type { SynonymReplacementRule } from '../utils/linguistics';
 import { confirmAction } from './ConfirmationModal';
 import { createLexiconEntry } from './LexiconEntry';
 import type { LexiconEntryInputs } from './LexiconEntry';
+import type { UsageIndex } from '../utils/UsageIndex';
 
 export interface LexiconModalOptions {
 	/** Vault-relative lexicon data path; defaults to vocabulary.lexicon. */
@@ -21,6 +21,8 @@ export interface LexiconModalOptions {
 	confirmedCommonTerms: string[];
 	/** Persists changes to the common-term confirmation list. */
 	persistCommonTermConfirmations: () => Promise<void>;
+	/** Shared service that supplies and refreshes vault-wide usage counts. */
+	usageIndex: UsageIndex;
 }
 
 /**
@@ -35,6 +37,7 @@ export class LexiconModal extends Modal {
 	private pluginDirectory?: string;
 	private confirmedCommonTerms: string[];
 	private persistCommonTermConfirmations: () => Promise<void>;
+	private usageIndex: UsageIndex;
 
 	/**
 	 * @param app Obsidian app instance used by the modal.
@@ -49,6 +52,7 @@ export class LexiconModal extends Modal {
 		this.pluginDirectory = options.pluginDirectory;
 		this.confirmedCommonTerms = options.confirmedCommonTerms;
 		this.persistCommonTermConfirmations = options.persistCommonTermConfirmations;
+		this.usageIndex = options.usageIndex;
 	}
 
 	/** Load lexicon data and usage counts, then build the interactive editor. */
@@ -80,7 +84,7 @@ export class LexiconModal extends Modal {
 
 		let getUsageCount: (value: string) => number;
 		try {
-			getUsageCount = await createUsageCounter(this.app, (completed, total) => {
+			getUsageCount = await this.usageIndex.getCounter((completed, total) => {
 				loadingIndicator.setText(`Scanning Markdown files (${completed}/${total})...`);
 			});
 		} catch (error) {
@@ -101,7 +105,7 @@ export class LexiconModal extends Modal {
 		 * all visible term, synonym, and collapsed row counts.
 		 */
 		const refreshUsageCounts = async (onProgress: (completed: number, total: number) => void) => {
-			getUsageCount = await createUsageCounter(this.app, onProgress);
+			getUsageCount = await this.usageIndex.refresh(onProgress);
 			entries.forEach(entry => {
 				entry.term.dispatchEvent(new Event('input'));
 				entry.synonyms.forEach(synonym => synonym.dispatchEvent(new Event('input')));
