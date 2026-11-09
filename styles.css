@@ -148,6 +148,51 @@ If your plugin does not need CSS, delete this file.
 	animation: lexicon-modal-shake 0.35s ease-in-out;
 }
 
+.word-frequency-view {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	gap: 0.5rem;
+	padding: 0.75rem;
+}
+
+.word-frequency-view h3,
+.word-frequency-view p {
+	margin: 0;
+}
+
+.word-frequency-description,
+.word-frequency-status {
+	color: var(--text-muted);
+	font-size: var(--font-smaller);
+}
+
+.word-frequency-list {
+	flex: 1;
+	overflow-y: auto;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.word-frequency-list li {
+	display: flex;
+	justify-content: space-between;
+	gap: 1rem;
+	padding: 0.25rem 0;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.word-frequency-word {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.word-frequency-count {
+	color: var(--text-muted);
+	font-variant-numeric: tabular-nums;
+}
+
 @keyframes lexicon-modal-shake {
 	0%,
 	100% {
