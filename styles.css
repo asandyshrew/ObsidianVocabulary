@@ -21,9 +21,33 @@ If your plugin does not need CSS, delete this file.
 }
 
 .lexicon-entry-summary {
+	display: flex;
+	align-items: center;
+	gap: 0.75rem;
 	cursor: pointer;
 	padding: 0.75rem;
 	font-weight: var(--font-semibold);
+}
+
+.lexicon-entry-title {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.lexicon-entry-usage-group {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	margin-left: auto;
+	color: var(--text-muted);
+	font-size: var(--font-smaller);
+	font-weight: var(--font-normal);
+}
+
+.lexicon-entry-usage-separator {
+	color: var(--text-faint);
 }
 
 .lexicon-entry-fields {
@@ -47,26 +71,44 @@ If your plugin does not need CSS, delete this file.
 	width: 100%;
 }
 
-.lexicon-tag-list {
+.lexicon-synonym-list {
 	display: flex;
 	flex-direction: column;
 	gap: 0.5rem;
 }
 
-.lexicon-tag-row {
+.lexicon-synonym-row {
 	display: flex;
+	align-items: center;
+	flex-wrap: nowrap;
 	gap: 0.5rem;
+	width: 100%;
 }
 
-.lexicon-tag-row input {
-	flex: 1;
+.lexicon-synonym-row input {
+	flex: 1 1 0;
+	width: 0;
+	min-width: 0;
 }
 
-.lexicon-tag-row button[aria-label="Remove tag"] {
+.lexicon-synonym-row > .lexicon-synonym-usage,
+.lexicon-synonym-row > button {
+	flex: 0 0 auto;
+}
+
+.lexicon-synonym-usage {
+	align-self: center;
+	min-width: 1.5em;
+	color: var(--text-muted);
+	text-align: center;
+	font-size: var(--font-smaller);
+}
+
+.lexicon-synonym-row button[aria-label="Remove synonym"] {
 	color: var(--text-error);
 }
 
-.lexicon-tag-row button[aria-label="Remove tag"]:hover {
+.lexicon-synonym-row button[aria-label="Remove synonym"]:hover {
 	color: var(--text-on-accent);
 	background-color: var(--background-modifier-error);
 }
