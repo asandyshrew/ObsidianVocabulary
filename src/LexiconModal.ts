@@ -13,6 +13,7 @@ import type { SynonymReplacementRule } from './linguistics';
  * The rendered UI is kept separate so saving and refactoring use these inputs.
  */
 interface LexiconEntryInputs {
+	container: HTMLDetailsElement;
 	term: HTMLInputElement;
 	definition: HTMLInputElement;
 	synonyms: HTMLInputElement[];
@@ -150,7 +151,7 @@ export class LexiconModal extends Modal {
 		const entriesEl = contentEl.createDiv({ cls: 'lexicon-entries' });
 		// Keep the inputs together so additions, removals, and saving use the same rows.
 		const entries: LexiconEntryInputs[] = [];
-
+		const saveErrors = new Map<HTMLInputElement, HTMLSpanElement>();
 		/**
 		 * Re-scan after a refactor and fire the existing input handlers to refresh
 		 * all visible term, synonym, and collapsed row counts.
@@ -211,6 +212,7 @@ export class LexiconModal extends Modal {
 
 			const termField = createField('Term', initialValues[0] || '', 0);
 			const rowInputs: LexiconEntryInputs = {
+				container: entry,
 				term: termField.input,
 				definition: createField('Definition', initialValues[1] || '', 1).input,
 				synonyms: [],
@@ -255,13 +257,23 @@ export class LexiconModal extends Modal {
 			 * Removing a synonym also removes its input from the values used on save.
 			 */
 			const addSynonym = (value = '') => {
-				const synonymRow = synonymList.createDiv({ cls: 'lexicon-synonym-row' });
+				const synonymItem = synonymList.createDiv({ cls: 'lexicon-synonym-item' });
+				const inputIndex = rowInputs.synonyms.length;
+				const errorId = `lexicon-synonym-error-${entryIndex}-${inputIndex}`;
+				const fieldError = synonymItem.createSpan({
+					cls: 'lexicon-save-error',
+					attr: { id: errorId, role: 'alert' },
+				});
+				fieldError.hide();
+				const synonymRow = synonymItem.createDiv({ cls: 'lexicon-synonym-row' });
 				const input = synonymRow.createEl('input', {
 					type: 'text',
 					value,
 					placeholder: 'Synonym',
 					attr: { 'aria-label': 'Synonym' },
 				});
+				input.setAttribute('aria-describedby', errorId);
+				saveErrors.set(input, fieldError);
 				const usageCount = synonymRow.createSpan({
 					cls: 'lexicon-synonym-usage',
 					attr: { 'aria-live': 'polite' },
@@ -290,7 +302,9 @@ export class LexiconModal extends Modal {
 					attr: { type: 'button', 'aria-label': 'Remove synonym' },
 				});
 				removeButton.addEventListener('click', () => {
-					synonymRow.remove();
+					synonymItem.remove();
+					fieldError.remove();
+					saveErrors.delete(input);
 					// Remove the detached input from the data model as well as the UI.
 					const inputIndex = rowInputs.synonyms.indexOf(input);
 					if (inputIndex !== -1) {
@@ -311,11 +325,20 @@ export class LexiconModal extends Modal {
 			);
 			synonyms.forEach(synonym => addSynonym(synonym));
 
-			const addSynonymButton = synonymField.createEl('button', {
+			const synonymActions = synonymField.createDiv({ cls: 'lexicon-synonym-actions' });
+			const addSynonymButton = synonymActions.createEl('button', {
 				text: 'Add synonym',
 				attr: { type: 'button' },
 			});
 			addSynonymButton.addEventListener('click', () => addSynonym());
+
+			const refactorEntryButton = synonymActions.createEl('button', {
+				text: 'Refactor',
+				attr: { type: 'button', 'aria-label': `Refactor ${rowInputs.term.value || 'this term'}` },
+			});
+			refactorEntryButton.addEventListener('click', () => {
+				void refactorEntries([rowInputs], refactorEntryButton);
+			});
 		};
 
 		if (rawContent.trim().length > 0) {
@@ -341,13 +364,20 @@ export class LexiconModal extends Modal {
 			text: 'Refactor',
 			attr: { type: 'button' },
 		});
-		refactorButton.onclick = async () => {
+		refactorButton.onclick = () => refactorEntries(entries, refactorButton);
+		const app = this.app;
+		const modalEl = this.modalEl;
+
+		async function refactorEntries(
+			targetEntries: LexiconEntryInputs[],
+			button: HTMLButtonElement,
+		) {
 			// Build one unambiguous replacement mapping per normalized synonym.
 			const termRules = new Map<string, string>();
 			const rules: SynonymReplacementRule[] = [];
 			let invalidEntry = '';
 
-			entries.forEach(entry => {
+			targetEntries.forEach(entry => {
 				const term = entry.term.value.trim();
 				if (!term) {
 					if (entry.synonyms.some(synonym => synonym.value.trim())) {
@@ -384,11 +414,11 @@ export class LexiconModal extends Modal {
 				return;
 			}
 
-			refactorButton.disabled = true;
+			button.disabled = true;
 			const progress = contentEl.createEl('p', { cls: 'loading-text' });
 			try {
 				// Scan first so the user can approve each larger-word match before writing.
-				const scan = await scanRefactorCandidates(this.app, rules, (completed, total) => {
+				const scan = await scanRefactorCandidates(app, rules, (completed, total) => {
 					progress.setText(`Checking Markdown files (${completed}/${total})...`);
 				});
 
@@ -396,7 +426,7 @@ export class LexiconModal extends Modal {
 				for (const { word, term } of scan.largerWords) {
 					// Exact synonym tokens do not appear here and need no individual prompt.
 					const confirmed = await confirmAction(
-						this.app,
+						app,
 						'Replace a matching word?',
 						`"${word}" contains a synonym. Replace every occurrence of "${word}" with "${term}"?`,
 						'Replace word',
@@ -415,7 +445,7 @@ export class LexiconModal extends Modal {
 				}
 
 				const confirmed = await confirmAction(
-					this.app,
+					app,
 					'Confirm refactor',
 					`Replace matching synonyms in ${changedFiles.length} Markdown file(s)? Exact synonym matches and approved larger words will be replaced.`,
 					'Refactor files',
@@ -430,10 +460,10 @@ export class LexiconModal extends Modal {
 				try {
 					for (const { file } of changedFiles) {
 						progress.setText(`Refactoring Markdown files (${updatedFiles + 1}/${changedFiles.length})...`);
-						const currentContent = await this.app.vault.read(file);
+						const currentContent = await app.vault.read(file);
 						const updatedContent = replaceSynonymWords(currentContent, rules, approvedWords);
 						if (updatedContent !== currentContent) {
-							await this.app.vault.modify(file, updatedContent);
+							await app.vault.modify(file, updatedContent);
 						}
 						updatedFiles++;
 					}
@@ -475,8 +505,46 @@ export class LexiconModal extends Modal {
 				progress.remove();
 				refactorButton.disabled = false;
 			}
-		};
+		}
 		saveButton.onclick = async () => {
+			const synonymTerms = new Map<string, { synonym: string; term: string }>();
+			saveErrors.forEach(error => {
+				error.hide();
+				error.empty();
+			});
+			modalEl.removeClass('lexicon-modal-shake');
+			void modalEl.offsetWidth;
+			for (const entry of entries) {
+				const term = entry.term.value.trim();
+				if (!term) {
+					continue;
+				}
+
+				for (const synonymInput of entry.synonyms) {
+					const synonym = synonymInput.value.trim();
+					const normalizedSynonym = normalizeSynonym(synonym);
+					if (!normalizedSynonym) {
+						continue;
+					}
+
+					const existing = synonymTerms.get(normalizedSynonym);
+					if (existing && existing.term.toLowerCase() !== term.toLowerCase()) {
+						const message = `This synonym is assigned to both "${existing.term}" and "${term}".`;
+						const error = saveErrors.get(synonymInput);
+						if (error) {
+							error.setText(message);
+							error.show();
+						}
+						entry.container.open = true;
+						synonymInput.focus();
+						synonymInput.scrollIntoView({ block: 'center' });
+						modalEl.addClass('lexicon-modal-shake');
+						return;
+					}
+					synonymTerms.set(normalizedSynonym, { synonym, term });
+				}
+			}
+
 			// Keep the existing comma-delimited file format and omit entirely blank rows.
 			// Commas are stripped because the current storage format has no CSV escaping.
 			const rowsData = entries

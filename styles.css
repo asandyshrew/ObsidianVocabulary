@@ -117,8 +117,50 @@ If your plugin does not need CSS, delete this file.
 	align-self: flex-start;
 }
 
+.lexicon-synonym-actions {
+	display: flex;
+	gap: 0.5rem;
+	margin-top: 0.5rem;
+}
+
+.lexicon-synonym-actions button {
+	align-self: flex-start;
+}
+
 .modal-actions {
 	display: flex;
 	gap: 0.5rem;
 	margin-top: 1rem;
+}
+
+.lexicon-synonym-item {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+}
+
+.lexicon-save-error {
+	color: var(--text-error);
+	font-size: var(--font-smaller);
+}
+
+.lexicon-modal-shake {
+	animation: lexicon-modal-shake 0.35s ease-in-out;
+}
+
+@keyframes lexicon-modal-shake {
+	0%,
+	100% {
+		translate: 0 0;
+	}
+
+	20%,
+	60% {
+		translate: -6px 0;
+	}
+
+	40%,
+	80% {
+		translate: 6px 0;
+	}
 }
