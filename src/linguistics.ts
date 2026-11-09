@@ -1,27 +1,54 @@
 import { App, TFile } from 'obsidian';
 
+/**
+ * Counts case-insensitive matches for a term or synonym in the scanned vault.
+ */
 export type UsageCounter = (value: string) => number;
 
+/**
+ * Associates a synonym with the canonical term that should replace it.
+ */
 export interface SynonymReplacementRule {
 	synonym: string;
 	term: string;
 }
 
+/**
+ * The Markdown snapshot and larger words collected during a refactor scan.
+ *
+ * Keeping file contents from the scan lets the UI preview which files would
+ * change before it asks the user to confirm the write.
+ */
 export interface RefactorScan {
 	files: Array<{ file: TFile; content: string }>;
 	largerWords: Array<{ word: string; term: string }>;
 }
 
+/**
+ * Adds the usage count for each value, including repeated values if present.
+ */
 export function countTotalUsages(values: string[], getUsageCount: UsageCounter): number {
 	return values.reduce((total, value) => total + getUsageCount(value), 0);
 }
 
-// Treat "#word" in a Markdown tag the same as "word" in a lexicon field.
+/**
+ * Normalizes values for matching: trims surrounding whitespace, removes leading
+ * hashtag markers, and ignores letter casing.
+ *
+ * @param synonym A lexicon synonym, plain word, or Markdown hashtag.
+ * @returns The normalized value used by the count and replacement helpers.
+ */
 export function normalizeSynonym(synonym: string): string {
 	return synonym.trim().replace(/^#+/, '').toLowerCase();
 }
 
-// Advance one character after each match so overlapping substrings count too.
+/**
+ * Counts substring matches, including overlapping ones.
+ *
+ * @param text The text to search; callers provide normalized text.
+ * @param query The normalized substring to count.
+ * @returns The number of matches, or zero when the query is empty.
+ */
 function countOccurrences(text: string, query: string): number {
 	if (!query) {
 		return 0;
@@ -36,6 +63,20 @@ function countOccurrences(text: string, query: string): number {
 	return count;
 }
 
+/**
+ * Reads all Markdown files and collects candidate larger words for refactoring.
+ *
+ * Exact synonym tokens are not returned as larger-word candidates; those are
+ * replaced without an individual prompt. Tokens containing a synonym as a
+ * substring are returned so the caller can ask whether to replace each word.
+ * A token that matches synonyms mapped to different terms aborts the scan.
+ *
+ * @param app Obsidian app used to enumerate and read vault Markdown files.
+ * @param rules Synonym-to-term replacement mappings from the modal.
+ * @param onProgress Called after each file begins scanning.
+ * @returns File snapshots and unique larger words requiring user approval.
+ * @throws If any file cannot be read or a word maps to conflicting terms.
+ */
 export async function scanRefactorCandidates(
 	app: App,
 	rules: SynonymReplacementRule[],
@@ -54,6 +95,7 @@ export async function scanRefactorCandidates(
 		const content = await app.vault.read(file);
 		files.push({ file, content });
 
+		// Treat each Unicode letter/number/underscore sequence as a word candidate.
 		for (const match of content.matchAll(/[\p{L}\p{N}_]+/gu)) {
 			const word = match[0];
 			const normalizedWord = word.toLowerCase();
@@ -65,6 +107,7 @@ export async function scanRefactorCandidates(
 			if (terms.size > 1) {
 				throw new Error(`The word "${word}" matches synonyms assigned to different terms.`);
 			}
+			// Exact matches are safe to replace automatically, so only queue substrings.
 			if (terms.size === 0 || matchingRules.some(rule => normalizedWord === rule.synonym)) {
 				continue;
 			}
@@ -87,6 +130,19 @@ export async function scanRefactorCandidates(
 	};
 }
 
+/**
+ * Replaces exact synonym tokens and user-approved larger tokens in Markdown text.
+ *
+ * Matching is case-insensitive and replaces an entire token with the canonical
+ * term; it does not preserve the original token's casing. Punctuation and
+ * whitespace are left untouched. Conflicting synonym mappings are rejected.
+ *
+ * @param content Markdown content to update.
+ * @param rules Synonym-to-term replacement mappings.
+ * @param approvedWords Normalized larger words approved by the user.
+ * @returns Updated content; unchanged content if there are no approved matches.
+ * @throws If a token matches synonyms mapped to different terms.
+ */
 export function replaceSynonymWords(
 	content: string,
 	rules: SynonymReplacementRule[],
@@ -97,6 +153,7 @@ export function replaceSynonymWords(
 		term: rule.term,
 	}));
 
+	// Match the same token boundaries used when gathering refactor candidates.
 	return content.replace(/[\p{L}\p{N}_]+/gu, word => {
 		const normalizedWord = word.toLowerCase();
 		const matchingRules = normalizedRules.filter(rule =>
@@ -119,6 +176,18 @@ export function replaceSynonymWords(
 	});
 }
 
+/**
+ * Builds a reusable usage counter by scanning the vault's Markdown files.
+ *
+ * Hashtags are counted from Obsidian's parsed metadata, with each component
+ * of a hierarchical tag counted separately. The source ranges occupied by
+ * those hashtags are masked before the prose scan so each tag only counts once.
+ *
+ * @param app Obsidian app used to read Markdown files and their cached metadata.
+ * @param onProgress Called once per file with the completed and total counts.
+ * @returns A normalized, case-insensitive counter for any term or synonym.
+ * @throws If a Markdown file cannot be read.
+ */
 export async function createUsageCounter(
 	app: App,
 	onProgress: (completed: number, total: number) => void,
@@ -161,6 +230,7 @@ export async function createUsageCounter(
 			.sort((a, b) => a.start - b.start);
 		// Mask parsed hashtags so the prose scan won't count them twice.
 		markdownTagRanges.forEach(({ start, end }) => {
+			// Clamp metadata offsets in case the cached range exceeds current file text.
 			const rangeStart = Math.min(content.length, Math.max(offset, start));
 			const rangeEnd = Math.min(content.length, Math.max(rangeStart, end));
 			prose += content.slice(offset, rangeStart);

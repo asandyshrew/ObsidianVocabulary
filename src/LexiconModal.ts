@@ -8,12 +8,20 @@ import {
 } from './linguistics';
 import type { SynonymReplacementRule } from './linguistics';
 
+/**
+ * The editable controls belonging to one collapsible lexicon entry.
+ * The rendered UI is kept separate so saving and refactoring use these inputs.
+ */
 interface LexiconEntryInputs {
 	term: HTMLInputElement;
 	definition: HTMLInputElement;
 	synonyms: HTMLInputElement[];
 }
 
+/**
+ * Small confirmation dialog used for per-word and final refactor approval.
+ * Closing the dialog without choosing an action is treated as cancellation.
+ */
 class ConfirmationModal extends Modal {
 	private settled = false;
 
@@ -27,6 +35,7 @@ class ConfirmationModal extends Modal {
 		super(app);
 	}
 
+	/** Renders the question and its explicit cancel/confirm actions. */
 	onOpen() {
 		this.contentEl.createEl('h2', { text: this.title });
 		this.contentEl.createEl('p', { text: this.message });
@@ -43,6 +52,7 @@ class ConfirmationModal extends Modal {
 		});
 	}
 
+	/** Resolve an unanswered dialog as cancelled and release its contents. */
 	onClose() {
 		if (!this.settled) {
 			this.settled = true;
@@ -51,6 +61,7 @@ class ConfirmationModal extends Modal {
 		this.contentEl.empty();
 	}
 
+	/** Resolve at most once, even if a button click is followed by modal close. */
 	private finish(confirmed: boolean) {
 		if (this.settled) {
 			return;
@@ -61,6 +72,10 @@ class ConfirmationModal extends Modal {
 	}
 }
 
+/**
+ * Opens a confirmation dialog and resolves with the user's decision.
+ * Dismissing the dialog is equivalent to choosing Cancel.
+ */
 function confirmAction(
 	app: App,
 	title: string,
@@ -72,14 +87,26 @@ function confirmAction(
 	});
 }
 
+/**
+ * Editor for the root lexicon file.
+ *
+ * Each entry has a term, definition, and semicolon-separated synonyms. Counts
+ * come from the linguistics helper, while this class owns rendering, editing,
+ * confirmation prompts, and vault writes.
+ */
 export class LexiconModal extends Modal {
 	private fileName: string;
 
+	/**
+	 * @param app Obsidian app instance used by the modal.
+	 * @param fileName Vault-relative path of the lexicon data file.
+	 */
 	constructor(app: App, fileName: string = 'vocabulary.lexicon') {
 		super(app);
 		this.fileName = fileName;
 	}
 
+	/** Load lexicon data and usage counts, then build the interactive editor. */
 	async onOpen() {
 		const { contentEl } = this;
 		contentEl.empty();
@@ -94,6 +121,7 @@ export class LexiconModal extends Modal {
 		let rawContent = '';
 
 		try {
+			// Read through the adapter so the configured vault-relative path is used.
 			if (await this.app.vault.adapter.exists(this.fileName)) {
 				rawContent = await this.app.vault.adapter.read(this.fileName);
 			} else {
@@ -122,6 +150,11 @@ export class LexiconModal extends Modal {
 		const entriesEl = contentEl.createDiv({ cls: 'lexicon-entries' });
 		// Keep the inputs together so additions, removals, and saving use the same rows.
 		const entries: LexiconEntryInputs[] = [];
+
+		/**
+		 * Re-scan after a refactor and fire the existing input handlers to refresh
+		 * all visible term, synonym, and collapsed row counts.
+		 */
 		const refreshUsageCounts = async (onProgress: (completed: number, total: number) => void) => {
 			getUsageCount = await createUsageCounter(this.app, onProgress);
 			entries.forEach(entry => {
@@ -131,6 +164,13 @@ export class LexiconModal extends Modal {
 		};
 
 		// Build one collapsible entry; existing entries start closed, new ones open.
+		/**
+		 * Creates one entry and wires its editable fields, live counters, and controls.
+		 *
+		 * @param initialValues Term, definition, and serialized synonyms.
+		 * @param expanded Whether the details element starts open.
+		 * @param initialSynonyms Optional already-parsed synonyms.
+		 */
 		const addEntry = (
 			initialValues: string[] = ['', '', ''],
 			expanded = true,
@@ -210,6 +250,10 @@ export class LexiconModal extends Modal {
 			const synonymList = synonymField.createDiv({ cls: 'lexicon-synonym-list' });
 
 			// Each synonym owns its counter and controls, while the entry tracks its input.
+			/**
+			 * Adds a synonym input and keeps the entry's total synchronized with it.
+			 * Removing a synonym also removes its input from the values used on save.
+			 */
 			const addSynonym = (value = '') => {
 				const synonymRow = synonymList.createDiv({ cls: 'lexicon-synonym-row' });
 				const input = synonymRow.createEl('input', {
@@ -298,6 +342,7 @@ export class LexiconModal extends Modal {
 			attr: { type: 'button' },
 		});
 		refactorButton.onclick = async () => {
+			// Build one unambiguous replacement mapping per normalized synonym.
 			const termRules = new Map<string, string>();
 			const rules: SynonymReplacementRule[] = [];
 			let invalidEntry = '';
@@ -342,12 +387,14 @@ export class LexiconModal extends Modal {
 			refactorButton.disabled = true;
 			const progress = contentEl.createEl('p', { cls: 'loading-text' });
 			try {
+				// Scan first so the user can approve each larger-word match before writing.
 				const scan = await scanRefactorCandidates(this.app, rules, (completed, total) => {
 					progress.setText(`Checking Markdown files (${completed}/${total})...`);
 				});
 
 				const approvedWords = new Set<string>();
 				for (const { word, term } of scan.largerWords) {
+					// Exact synonym tokens do not appear here and need no individual prompt.
 					const confirmed = await confirmAction(
 						this.app,
 						'Replace a matching word?',
@@ -377,6 +424,8 @@ export class LexiconModal extends Modal {
 					return;
 				}
 
+				// Re-read each file immediately before changing it to avoid overwriting
+				// edits made while the user was answering the confirmation dialogs.
 				let updatedFiles = 0;
 				try {
 					for (const { file } of changedFiles) {
@@ -389,6 +438,7 @@ export class LexiconModal extends Modal {
 						updatedFiles++;
 					}
 				} catch (error) {
+					// Earlier writes cannot be rolled back, so refresh counts for partial work.
 					console.error('Refactor stopped before all files were updated:', error);
 					new Notice(`Refactor stopped after updating ${updatedFiles} of ${changedFiles.length} files.`);
 					if (updatedFiles > 0) {
@@ -407,6 +457,7 @@ export class LexiconModal extends Modal {
 
 				progress.setText('Refreshing usage counts...');
 				try {
+					// Rebuild the counter from the updated vault and refresh every visible count.
 					await refreshUsageCounts((completed, total) => {
 						progress.setText(`Refreshing usage counts (${completed}/${total})...`);
 					});
@@ -427,6 +478,7 @@ export class LexiconModal extends Modal {
 		};
 		saveButton.onclick = async () => {
 			// Keep the existing comma-delimited file format and omit entirely blank rows.
+			// Commas are stripped because the current storage format has no CSV escaping.
 			const rowsData = entries
 				.map(entry => [
 					entry.term.value,
@@ -447,6 +499,7 @@ export class LexiconModal extends Modal {
 		};
 	}
 
+	/** Remove modal content when Obsidian closes the dialog. */
 	onClose() {
 		this.contentEl.empty();
 	}
