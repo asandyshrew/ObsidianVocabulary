@@ -423,9 +423,7 @@ export class WordFrequencyView extends ItemView {
 		if (!isCurrent()) {
 			return;
 		}
-		this.words = isFinal
-			? await this.sortWords(entries, isCurrent)
-			: entries;
+		this.words = await this.sortWords(entries, isCurrent);
 		if (!isCurrent()) {
 			return;
 		}
@@ -560,6 +558,7 @@ export class WordFrequencyView extends ItemView {
 			? `${visibleWords.length.toLocaleString()} words ${this.sourceLabel}`
 			: `Scanning ${scannedWords.toLocaleString()} words ${this.sourceLabel}`);
 		const liveWords = new Set(this.words.map(entry => entry.word));
+		let rowPosition = 0;
 		for (let index = 0; index < this.words.length; index++) {
 			if (!isCurrent()) {
 				return;
@@ -577,6 +576,10 @@ export class WordFrequencyView extends ItemView {
 			const isVisible = (!shouldHideCommon || !isCommon) &&
 				(!query || entry.word.includes(query));
 			row.item.hidden = !isVisible;
+			const currentRow = this.listEl.children.item(rowPosition);
+			if (currentRow !== row.item) {
+				this.listEl.insertBefore(row.item, currentRow);
+			}
 			row.count.setText(entry.count.toLocaleString());
 			const relativeFrequency = totalCount > 0 ? entry.count / totalCount : 0;
 			const relativePercent = relativeFrequency * 100;
@@ -585,9 +588,7 @@ export class WordFrequencyView extends ItemView {
 				`Relative frequency: ${relativePercent.toFixed(2)}% of all words`,
 			);
 			row.barFill.style.width = `${relativePercent}%`;
-			if (isFinal) {
-				this.listEl.appendChild(row.item);
-			}
+			rowPosition++;
 			if ((index + 1) % RENDER_BATCH_SIZE === 0) {
 				await yieldToUI();
 			}
