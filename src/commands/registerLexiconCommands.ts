@@ -17,7 +17,7 @@ export function registerLexiconCommands(
 	const openLexiconModal = () => new LexiconModal(plugin.app, options).open();
 
 	plugin.addCommand({
-		id: 'open-lexicon-modal',
+		id: 'open-TFD-modal',
 		name: 'Open lexicon modal',
 		callback: openLexiconModal,
 	});
